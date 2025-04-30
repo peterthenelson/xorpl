@@ -1,0 +1,46 @@
+# Rust build files
+/target/
+
+# Cargo package files
+**/*.rs.bk
+Cargo.lock
+# Uncomment if you're publishing a library and want to ignore lockfile:
+# !Cargo.lock
+
+# Backup files
+*.bak
+*.swp
+*.tmp
+
+# Logs
+*.log
+
+# By-products of 'cargo test'
+**/*.dSYM/
+*.gcno
+
+# IDEs and editors
+# VS Code
+.vscode/
+*.code-workspace
+
+# IntelliJ / CLion / RustRover (JetBrains)
+.idea/
+*.iml
+
+# Emacs
+*~
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# Optional: ignore coverage output
+/coverage/
