@@ -18,6 +18,14 @@ pub fn div<const N: usize>(reg: &mut [i32; N], a_x: usize, a_y: usize, b_x: usiz
     xop(reg, a_x, a_y, b_x, b_y, c_x, c_y, |x, y| x / y);
 }
 
+pub fn swap<const N: usize>(reg: &mut [i32; N], x: usize, y: usize) {
+    (reg[x % N], reg[y % N]) = (reg[y % N], reg[x % N]);
+}
+
+pub fn move_reg<const N: usize>(reg: &mut [i32; N], x: usize, y: usize) {
+    reg[y % N] = reg[x % N];
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -60,5 +68,21 @@ mod test {
         let mut reg: [i32; 8] = setup_reg(222, 333, 100);
         div(&mut reg, 0, 1, 2, 3, 4, 5);
         assert_eq!(reg[4], 0x1337BEEF ^ (222 / 333));
+    }
+
+    #[test]
+    fn test_swap() {
+        let mut reg: [i32; 8] = setup_reg(222, 333, 100);
+        swap(&mut reg, 0, 1);
+        assert_eq!(reg[0], 0x7ABC1234);
+        assert_eq!(reg[1], 0x7ABC1234 ^ 222);
+    }
+
+    #[test]
+    fn test_move_reg() {
+        let mut reg: [i32; 8] = setup_reg(222, 333, 100);
+        move_reg(&mut reg, 0, 1);
+        assert_eq!(reg[0], 0x7ABC1234 ^ 222);
+        assert_eq!(reg[1], 0x7ABC1234 ^ 222);
     }
 }
