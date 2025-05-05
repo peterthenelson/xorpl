@@ -293,6 +293,15 @@ mod test {
     }
 
     #[test]
+    fn test_swap_trick() {
+        let mut x = XMatrix::<3, 3>::parse("110\n001\n000\n").unwrap();
+        x.add_row(0, 1);
+        x.add_row(1, 0);
+        x.add_row(0, 1);
+        assert_eq!(x.serialize(), "001\n110\n000\n");
+    }
+
+    #[test]
     fn test_row_echelon() {
         let mut x = XMatrix::<3, 3>::parse("110\n101\n100\n").unwrap();
         x.row_echelon();
