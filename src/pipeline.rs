@@ -12,9 +12,10 @@
 //!   ──split_secret_consts──► Circuit'' ──from_circuit──► MaskedCircuit
 //! ```
 //!
-//! The server receives [`Compilation::circuit`] and verifies checksums by
-//! calling [`Circuit::eval`] directly.  [`Compilation::emit`] produces the
-//! client-side Rust source from [`Compilation::masked`].
+//! The server receives [`Compilation::circuit`] (identified by
+//! [`Compilation::rotation_tag`]) and verifies checksums via
+//! [`Circuit::eval`].  The browser receives [`Compilation::code`] compiled
+//! to Wasm, plus a server verifier emitted by [`crate::emit::emit_verifier_rust`].
 
 use std::rc::Rc;
 
@@ -41,6 +42,11 @@ pub struct Compilation {
     pub circuit: Circuit,
     /// Concretized client artifact — baked masks, constants, and triples.
     pub masked: MaskedCircuit,
+    /// Structural fingerprint of [`Compilation::circuit`].  Stable across
+    /// cheap rotations (same circuit, new masks); changes on strong rotation.
+    /// The browser bakes this into its Wasm export and sends it with every
+    /// event report so the server can select the matching verifier.
+    pub rotation_tag: u32,
     /// Emitted Rust source — the deployable client function.
     pub code: String,
 }
@@ -63,13 +69,14 @@ pub struct Compilation {
 /// identifier.  All randomness comes from `rng`; the caller seeds it however
 /// they like.
 pub fn compile(expr: Rc<Expr>, fn_name: &str, rng: &mut impl RngCore) -> Compilation {
-    let transformed = strong_rotate(&expr, rng);
-    let circuit     = lower_to_circuit(&transformed);
-    let circuit     = inject_remasks(&circuit, rng, 4);
-    let circuit     = split_secret_consts(&circuit, rng, 3);
-    let masked      = MaskedCircuit::from_circuit(&circuit, rng);
-    let code        = emit_rust(&masked, &circuit, fn_name, rng);
-    Compilation { original_expr: expr, circuit, masked, code }
+    let transformed  = strong_rotate(&expr, rng);
+    let circuit      = lower_to_circuit(&transformed);
+    let circuit      = inject_remasks(&circuit, rng, 4);
+    let circuit      = split_secret_consts(&circuit, rng, 3);
+    let rotation_tag = circuit.fingerprint();
+    let masked       = MaskedCircuit::from_circuit(&circuit, rng);
+    let code         = emit_rust(&masked, &circuit, fn_name, rng);
+    Compilation { original_expr: expr, circuit, masked, rotation_tag, code }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,5 +153,42 @@ mod tests {
         let expected = vals[&circuit.egress];
 
         run(Rc::clone(&expr), &[("a", av), ("b", bv), ("c", cv), ("d", dv)], expected);
+    }
+
+    #[test]
+    fn rotation_tag_stable_across_cheap_rotation() {
+        // Cheap rotation = same circuit, new MaskedCircuit seed.
+        // Fingerprint depends only on the Circuit, so it must not change.
+        let a = Expr::input("a");
+        let b = Expr::input("b");
+        let c = Expr::secret_const(0x9e37_79b9);
+        let expr = Rc::new(Expr::rotl(Expr::xor(Expr::or(a, b), c), 5));
+
+        // Use the same strong-rotate seed so the circuit structure is identical.
+        let mut rng1 = rand::rngs::StdRng::seed_from_u64(0);
+        let mut rng2 = rand::rngs::StdRng::seed_from_u64(0);
+
+        let c1 = compile(Rc::clone(&expr), "f", &mut rng1);
+        let c2 = compile(Rc::clone(&expr), "f", &mut rng2);
+
+        assert_eq!(c1.rotation_tag, c2.rotation_tag,
+            "same pipeline seed must yield same rotation_tag");
+    }
+
+    #[test]
+    fn rotation_tag_differs_across_strong_rotation() {
+        let a = Expr::input("a");
+        let b = Expr::input("b");
+        let c = Expr::secret_const(0x9e37_79b9);
+        let expr = Rc::new(Expr::rotl(Expr::xor(Expr::or(a, b), c), 5));
+
+        let mut rng1 = rand::rngs::StdRng::seed_from_u64(1);
+        let mut rng2 = rand::rngs::StdRng::seed_from_u64(2);
+
+        let c1 = compile(Rc::clone(&expr), "f", &mut rng1);
+        let c2 = compile(Rc::clone(&expr), "f", &mut rng2);
+
+        assert_ne!(c1.rotation_tag, c2.rotation_tag,
+            "different pipeline seeds should (almost certainly) yield different rotation_tags");
     }
 }

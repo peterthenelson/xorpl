@@ -20,7 +20,8 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use xorpl::{
-    emit::emit_rust,
+    emit::{emit_rust, emit_verifier_rust},
+    expr::Expr,
     fixture_defs::ALL_FIXTURES,
     lower::lower_to_circuit,
     mask::MaskedCircuit,
@@ -175,6 +176,50 @@ fn fixtures_not_out_of_sync() {
             def.name
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Verifier correctness
+// ---------------------------------------------------------------------------
+
+mod or_rotl_demo_verifier {
+    include!("fixtures/or_rotl_demo_verifier.rs");
+
+    #[test]
+    fn gives_right_answer() {
+        let cases: &[(u32, u32)] = &[
+            (0x0000_0000, 0x0000_0000),
+            (0xFFFF_FFFF, 0xFFFF_FFFF),
+            (0x1234_5678, 0xDEAD_BEEF),
+            (0xAAAA_AAAA, 0x5555_5555),
+        ];
+        for &(a, b) in cases {
+            let expected = ((a | b) ^ 0x9e37_79b9u32).rotate_left(5);
+            assert_eq!(or_rotl_demo_verify(a, b), expected,
+                "inputs ({a:#010x}, {b:#010x})");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verifier skew check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verifier_fixture_not_out_of_sync() {
+    let a = Expr::input("a");
+    let b = Expr::input("b");
+    let c = Expr::secret_const(0x9e37_79b9);
+    let expr = Expr::rotl(Expr::xor(Expr::or(a, b), c), 5);
+    let circuit = lower_to_circuit(&expr);
+    let emitted = emit_verifier_rust(&circuit, "or_rotl_demo_verify");
+
+    let path    = "tests/fixtures/or_rotl_demo_verifier.rs";
+    let on_disk = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+
+    assert_eq!(emitted, on_disk,
+        "verifier fixture is out of sync — re-emit with emit_verifier_rust");
 }
 
 // ---------------------------------------------------------------------------
