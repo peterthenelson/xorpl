@@ -172,12 +172,22 @@ impl Circuit {
         v
     }
 
-    /// Internal consistency check. `Circuit` is a plain data type; callers are
-    /// not expected to call this directly. `Builder::build` is the canonical
-    /// enforcement point — it calls `validate` after assembling the circuit and
-    /// panics on failure, so a valid `Circuit` can only be produced through
-    /// `Builder`. `ConcreteVm::from_circuit` calls it as a defensive assertion
-    /// on circuits it receives.
+    /// Full structural check for a `Circuit`.
+    ///
+    /// Verifies:
+    /// - The egress WireId is in range and has the Egress role.
+    /// - Exactly one `Gadget::Egress` exists.
+    /// - Every gadget's output WireId is in range and written at most once
+    ///   (single-assignment).
+    /// - Every gadget's input WireIds are in range, not Egress-role wires
+    ///   (unless it is the Egress gadget), and already written by an earlier
+    ///   gadget (topological order).
+    /// - Every GenId reference is in range and used by at most one gadget
+    ///   (uniqueness — no triple reuse).
+    ///
+    /// `Builder::build` calls this and panics on failure.  Circuit transforms
+    /// that construct a `Circuit` directly should call it too — it is the
+    /// complete safety net for any construction path, not a Builder-only concern.
     pub(crate) fn validate(&self) -> Result<(), String> {
         let nw = self.wires.len();
         let ng = self.generators.len();
@@ -193,9 +203,15 @@ impl Circuit {
         }
 
         let mut written: HashSet<WireId> = HashSet::new();
+        let mut used_gens: HashSet<GenId> = HashSet::new();
+        let mut egress_count = 0usize;
 
         for (idx, g) in self.gadgets.iter().enumerate() {
             let label = || format!("gadget[{idx}] {}", g.kind());
+
+            if matches!(g, Gadget::Egress { .. }) {
+                egress_count += 1;
+            }
 
             if let Some(out) = g.out() {
                 if out >= nw {
@@ -217,13 +233,23 @@ impl Circuit {
                 } else if self.wires[a] == Wire::Egress {
                     return Err(format!("{}: input WireId {a} has role Egress", label()));
                 }
+                if !written.contains(&a) {
+                    return Err(format!("{}: input WireId {a} read before it is written (topological order violation)", label()));
+                }
             }
 
             for gen in g.gen_refs() {
                 if gen >= ng {
                     return Err(format!("{}: GenId {gen} out of range ({ng} generators)", label()));
                 }
+                if !used_gens.insert(gen) {
+                    return Err(format!("{}: GenId {gen} already used by an earlier gadget (triple reuse)", label()));
+                }
             }
+        }
+
+        if egress_count != 1 {
+            return Err(format!("expected exactly 1 Egress gadget, found {egress_count}"));
         }
 
         Ok(())
