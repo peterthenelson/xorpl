@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -70,6 +70,30 @@ impl Gadget {
             Gadget::And { .. } => "AND",
             Gadget::Remask { .. } => "REMASK",
             Gadget::Egress { .. } => "EGRESS",
+        }
+    }
+
+    fn input_wires(&self) -> Vec<WireId> {
+        match self {
+            Gadget::Xor { a, b, .. } | Gadget::And { a, b, .. } => vec![*a, *b],
+            Gadget::XorConst { a, .. }
+            | Gadget::AndConst { a, .. }
+            | Gadget::Rotl { a, .. }
+            | Gadget::Remask { a, .. }
+            | Gadget::Egress { a } => vec![*a],
+            Gadget::PublicConst { .. }
+            | Gadget::SecretConst { .. }
+            | Gadget::Ingest { .. } => vec![],
+        }
+    }
+
+    fn gen_refs(&self) -> Vec<GenId> {
+        match self {
+            Gadget::SecretConst { gen, .. }
+            | Gadget::Ingest { gen, .. }
+            | Gadget::And { gen, .. }
+            | Gadget::Remask { gen, .. } => vec![*gen],
+            _ => vec![],
         }
     }
 
@@ -147,6 +171,57 @@ impl Circuit {
         }
         v
     }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let nw = self.wires.len();
+        let ng = self.generators.len();
+
+        if self.egress >= nw {
+            return Err(format!("egress={} out of range ({nw} wires)", self.egress));
+        }
+        if self.wires[self.egress] != Wire::Egress {
+            return Err(format!(
+                "egress={} has role {:?}, expected Egress",
+                self.egress, self.wires[self.egress]
+            ));
+        }
+
+        let mut written: HashSet<WireId> = HashSet::new();
+
+        for (idx, g) in self.gadgets.iter().enumerate() {
+            let label = || format!("gadget[{idx}] {}", g.kind());
+
+            if let Some(out) = g.out() {
+                if out >= nw {
+                    return Err(format!("{}: output WireId {out} out of range", label()));
+                }
+                if !written.insert(out) {
+                    return Err(format!("{}: output WireId {out} already written by an earlier gadget", label()));
+                }
+            }
+
+            for a in g.input_wires() {
+                if a >= nw {
+                    return Err(format!("{}: input WireId {a} out of range", label()));
+                }
+                if matches!(g, Gadget::Egress { .. }) {
+                    if a != self.egress {
+                        return Err(format!("{}: reads wire {a}, expected circuit egress {}", label(), self.egress));
+                    }
+                } else if self.wires[a] == Wire::Egress {
+                    return Err(format!("{}: input WireId {a} has role Egress", label()));
+                }
+            }
+
+            for gen in g.gen_refs() {
+                if gen >= ng {
+                    return Err(format!("{}: GenId {gen} out of range ({ng} generators)", label()));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // ---------- what gets baked into a concrete VM image ----------
@@ -180,6 +255,7 @@ impl ConcreteVm {
     // CONCRETIZE: mask propagation + constant emission, in one topo pass.
     // =====================================================================
     pub fn from_circuit(c: &Circuit, seed: u64) -> ConcreteVm {
+        c.validate().expect("invalid circuit");
         let mut rng = StdRng::seed_from_u64(seed);
 
         // (4) sample every independent generator; GenId == index in c.generators
@@ -372,7 +448,9 @@ pub fn build_example() -> Circuit {
         Generator { purpose: "secret const C" },
         Generator { purpose: "AND output mask" },
     ];
-    Circuit { gadgets, wires, generators, egress: 7 }
+    let circuit = Circuit { gadgets, wires, generators, egress: 7 };
+    circuit.validate().expect("build_example produced an invalid circuit");
+    circuit
 }
 
 // reference (server) F, computed straight
