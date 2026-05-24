@@ -154,8 +154,129 @@ impl Expr {
 /// | `Or(x, PublicConst(0))` | `x` |
 /// | `Not(PublicConst(k))` | `PublicConst(!k)` |
 /// | `Rotl(PublicConst(k), r)` | `PublicConst(k.rotate_left(r))` |
-pub fn constant_fold(_expr: &Rc<Expr>) -> Rc<Expr> {
-    todo!()
+pub fn constant_fold(expr: &Rc<Expr>) -> Rc<Expr> {
+    let mut memo = std::collections::HashMap::new();
+    fold_node(expr, &mut memo)
+}
+
+fn fold_node(
+    expr: &Rc<Expr>,
+    memo: &mut std::collections::HashMap<*const Expr, Rc<Expr>>,
+) -> Rc<Expr> {
+    let ptr = Rc::as_ptr(expr);
+    if let Some(cached) = memo.get(&ptr) {
+        return cached.clone();
+    }
+
+    let result = match expr.as_ref() {
+        // Leaves: return as-is.
+        Expr::Input(_) | Expr::PublicConst(_) | Expr::SecretConst(_) => expr.clone(),
+
+        Expr::Xor(a, b) => {
+            let a = fold_node(a, memo);
+            let b = fold_node(b, memo);
+            match (a.as_ref(), b.as_ref()) {
+                // identity: x ^ 0 = x  (either order)
+                (_, Expr::PublicConst(0)) => a,
+                (Expr::PublicConst(0), _) => b,
+                // constant folding
+                (Expr::PublicConst(x), Expr::PublicConst(y)) => Expr::public_const(x ^ y),
+                (Expr::SecretConst(x), Expr::SecretConst(y)) => Expr::secret_const(x ^ y),
+                (Expr::SecretConst(x), Expr::PublicConst(y)) |
+                (Expr::PublicConst(y), Expr::SecretConst(x)) => Expr::secret_const(x ^ y),
+                _ => Expr::xor(a, b),
+            }
+        }
+
+        Expr::And(a, b) => {
+            let a = fold_node(a, memo);
+            let b = fold_node(b, memo);
+            match (a.as_ref(), b.as_ref()) {
+                // annihilator: x & 0 = 0
+                (_, Expr::PublicConst(0)) | (Expr::PublicConst(0), _) => Expr::public_const(0),
+                // identity: x & 0xffff_ffff = x  (either order)
+                (_, Expr::PublicConst(0xffff_ffff)) => a,
+                (Expr::PublicConst(0xffff_ffff), _) => b,
+                // constant folding
+                (Expr::PublicConst(x), Expr::PublicConst(y)) => Expr::public_const(x & y),
+                (Expr::SecretConst(x), Expr::SecretConst(y)) => Expr::secret_const(x & y),
+                (Expr::SecretConst(x), Expr::PublicConst(y)) |
+                (Expr::PublicConst(y), Expr::SecretConst(x)) => Expr::secret_const(x & y),
+                _ => Expr::and(a, b),
+            }
+        }
+
+        Expr::Or(a, b) => {
+            let a = fold_node(a, memo);
+            let b = fold_node(b, memo);
+            match (a.as_ref(), b.as_ref()) {
+                // identity: x | 0 = x  (either order)
+                (_, Expr::PublicConst(0)) => a,
+                (Expr::PublicConst(0), _) => b,
+                // annihilator: x | 0xffff_ffff = 0xffff_ffff
+                (_, Expr::PublicConst(0xffff_ffff)) | (Expr::PublicConst(0xffff_ffff), _) => {
+                    Expr::public_const(0xffff_ffff)
+                }
+                // constant folding
+                (Expr::PublicConst(x), Expr::PublicConst(y)) => Expr::public_const(x | y),
+                (Expr::SecretConst(x), Expr::SecretConst(y)) => Expr::secret_const(x | y),
+                (Expr::SecretConst(x), Expr::PublicConst(y)) |
+                (Expr::PublicConst(y), Expr::SecretConst(x)) => Expr::secret_const(x | y),
+                _ => Expr::or(a, b),
+            }
+        }
+
+        Expr::Not(a) => {
+            let a = fold_node(a, memo);
+            match a.as_ref() {
+                Expr::PublicConst(k) => Expr::public_const(!k),
+                Expr::SecretConst(k) => Expr::secret_const(!k),
+                _ => Expr::not(a),
+            }
+        }
+
+        Expr::Add(a, b) => {
+            let a = fold_node(a, memo);
+            let b = fold_node(b, memo);
+            match (a.as_ref(), b.as_ref()) {
+                (Expr::PublicConst(x), Expr::PublicConst(y)) => {
+                    Expr::public_const(x.wrapping_add(*y))
+                }
+                (Expr::SecretConst(x), Expr::SecretConst(y)) => {
+                    Expr::secret_const(x.wrapping_add(*y))
+                }
+                (Expr::SecretConst(x), Expr::PublicConst(y)) |
+                (Expr::PublicConst(y), Expr::SecretConst(x)) => {
+                    Expr::secret_const(x.wrapping_add(*y))
+                }
+                _ => Expr::add(a, b),
+            }
+        }
+
+        Expr::Rotl(a, r) => {
+            let a = fold_node(a, memo);
+            let r = *r;
+            match a.as_ref() {
+                Expr::PublicConst(k) => Expr::public_const(k.rotate_left(r)),
+                Expr::SecretConst(k) => Expr::secret_const(k.rotate_left(r)),
+                _ => Expr::rotl(a, r),
+            }
+        }
+
+        Expr::Mux { cond, on_true, on_false } => {
+            let cond     = fold_node(cond, memo);
+            let on_true  = fold_node(on_true, memo);
+            let on_false = fold_node(on_false, memo);
+            match cond.as_ref() {
+                Expr::PublicConst(0xffff_ffff) => on_true,
+                Expr::PublicConst(0)           => on_false,
+                _ => Expr::mux(cond, on_true, on_false),
+            }
+        }
+    };
+
+    memo.insert(ptr, result.clone());
+    result
 }
 
 /// Randomly reassociate XOR and AND trees.
@@ -272,4 +393,143 @@ pub fn apply_identities(_expr: &Rc<Expr>, _rng: &mut impl rand::RngCore) -> Rc<E
 /// rotation (same shape, fresh baked constants).
 pub fn strong_rotate(_expr: &Rc<Expr>, _rng: &mut impl rand::RngCore) -> Rc<Expr> {
     todo!()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lower::lower_to_circuit;
+    use crate::vm::ConcreteVm;
+
+    // Evaluate a circuit expression at specific inputs across several seeds
+    // and return all revealed values (should all agree).
+    fn eval_all_seeds(expr: &Rc<Expr>, inputs: &[(&str, u32)]) -> Vec<u32> {
+        let circuit = lower_to_circuit(expr);
+        let input_map: std::collections::HashMap<String, u32> =
+            inputs.iter().map(|&(k, v)| (k.to_string(), v)).collect();
+        (0u64..8)
+            .map(|seed| {
+                let vm = ConcreteVm::from_circuit(&circuit, seed);
+                vm.eval(&input_map).1
+            })
+            .collect()
+    }
+
+    fn eval(expr: &Rc<Expr>, inputs: &[(&str, u32)]) -> u32 {
+        let vals = eval_all_seeds(expr, inputs);
+        assert!(vals.iter().all(|&v| v == vals[0]), "seed disagreement");
+        vals[0]
+    }
+
+    // Assert that two expressions are semantically equivalent for all given
+    // input tuples.
+    fn assert_equiv(a: &Rc<Expr>, b: &Rc<Expr>, cases: &[&[(&str, u32)]]) {
+        for &inputs in cases {
+            let va = eval(a, inputs);
+            let vb = eval(b, inputs);
+            assert_eq!(va, vb, "not equivalent for inputs {inputs:?}");
+        }
+    }
+
+    // --- constant_fold tests ---
+
+    #[test]
+    fn fold_public_xor() {
+        let expr = Expr::xor(Expr::public_const(0x0F0F_0F0F), Expr::public_const(0xF0F0_F0F0));
+        let folded = constant_fold(&expr);
+        assert!(matches!(folded.as_ref(), Expr::PublicConst(0xFFFF_FFFF)));
+    }
+
+    #[test]
+    fn fold_secret_xor() {
+        let expr = Expr::xor(Expr::secret_const(0xAAAA_AAAA), Expr::secret_const(0x5555_5555));
+        let folded = constant_fold(&expr);
+        assert!(matches!(folded.as_ref(), Expr::SecretConst(0xFFFF_FFFF)));
+    }
+
+    #[test]
+    fn fold_mixed_becomes_secret() {
+        let expr = Expr::xor(Expr::secret_const(1), Expr::public_const(2));
+        let folded = constant_fold(&expr);
+        assert!(matches!(folded.as_ref(), Expr::SecretConst(3)));
+    }
+
+    #[test]
+    fn fold_xor_zero_identity() {
+        let a = Expr::input("a");
+        let expr = Expr::xor(a.clone(), Expr::public_const(0));
+        let folded = constant_fold(&expr);
+        assert!(Rc::ptr_eq(&folded, &a));
+    }
+
+    #[test]
+    fn fold_and_zero_annihilator() {
+        let a = Expr::input("a");
+        let expr = Expr::and(a, Expr::public_const(0));
+        let folded = constant_fold(&expr);
+        assert!(matches!(folded.as_ref(), Expr::PublicConst(0)));
+    }
+
+    #[test]
+    fn fold_and_all_ones_identity() {
+        let a = Expr::input("a");
+        let expr = Expr::and(a.clone(), Expr::public_const(0xffff_ffff));
+        let folded = constant_fold(&expr);
+        assert!(Rc::ptr_eq(&folded, &a));
+    }
+
+    #[test]
+    fn fold_not_const() {
+        let expr = Expr::not(Expr::public_const(0x0000_FFFF));
+        let folded = constant_fold(&expr);
+        assert!(matches!(folded.as_ref(), Expr::PublicConst(0xFFFF_0000)));
+    }
+
+    #[test]
+    fn fold_rotl_const() {
+        let expr = Expr::rotl(Expr::public_const(1), 4);
+        let folded = constant_fold(&expr);
+        assert!(matches!(folded.as_ref(), Expr::PublicConst(16)));
+    }
+
+    #[test]
+    fn fold_mux_const_cond() {
+        let t = Expr::input("t");
+        let f = Expr::input("f");
+        let always_t = Expr::mux(Expr::public_const(0xffff_ffff), t.clone(), f.clone());
+        let always_f = Expr::mux(Expr::public_const(0), t.clone(), f.clone());
+        assert!(Rc::ptr_eq(&constant_fold(&always_t), &t));
+        assert!(Rc::ptr_eq(&constant_fold(&always_f), &f));
+    }
+
+    #[test]
+    fn fold_preserves_semantics() {
+        // A tree mixing constants and inputs should compute the same value
+        // before and after folding.
+        let a = Expr::input("a");
+        let expr = Expr::xor(
+            Expr::and(a.clone(), Expr::public_const(0xFFFF_0000)),
+            Expr::xor(Expr::public_const(0x1234_0000), Expr::public_const(0x0000_5678)),
+        );
+        let folded = constant_fold(&expr);
+        let cases: &[&[(&str, u32)]] = &[
+            &[("a", 0xDEAD_BEEF)],
+            &[("a", 0x0000_0000)],
+            &[("a", 0xFFFF_FFFF)],
+        ];
+        assert_equiv(&expr, &folded, cases);
+    }
+
+    #[test]
+    fn fold_shared_node_once() {
+        // Shared Rc node: constant_fold must not transform it twice.
+        let k = Expr::xor(Expr::public_const(1), Expr::public_const(2)); // folds to 3
+        let expr = Expr::xor(k.clone(), k.clone()); // 3 ^ 3 = 0
+        let folded = constant_fold(&expr);
+        assert!(matches!(folded.as_ref(), Expr::PublicConst(0)));
+    }
 }
