@@ -127,40 +127,149 @@ impl Expr {
 
 /// Evaluate any sub-expression whose leaves are all constants.
 ///
-/// Example: `Xor(PublicConst(1), PublicConst(2))` → `PublicConst(3)`.
-/// Secret constants are folded only with other secret constants (the result
-/// stays secret).
+/// # Algorithm
+///
+/// Bottom-up recursive fold with a `HashMap<*const Expr, Rc<Expr>>` memo so
+/// shared nodes are transformed exactly once.  At each node:
+///
+/// - If both children folded to constants, evaluate the operation in `u32`
+///   arithmetic and return a new const node.
+/// - Otherwise return a structurally-identical node whose children are the
+///   already-folded sub-trees.
+///
+/// # Constant kinds
+///
+/// `PublicConst op PublicConst  → PublicConst`
+/// `SecretConst op anything     → SecretConst`  (secret leaks through any op)
+/// `PublicConst op SecretConst  → SecretConst`
+///
+/// # Short-circuit / identity rules (applied before recursing into children)
+///
+/// | Pattern | Result |
+/// |---------|--------|
+/// | `Xor(x, PublicConst(0))` | `x` |
+/// | `And(x, PublicConst(0))` | `PublicConst(0)` |
+/// | `And(x, PublicConst(0xffff_ffff))` | `x` |
+/// | `Or(x, PublicConst(0xffff_ffff))` | `PublicConst(0xffff_ffff)` |
+/// | `Or(x, PublicConst(0))` | `x` |
+/// | `Not(PublicConst(k))` | `PublicConst(!k)` |
+/// | `Rotl(PublicConst(k), r)` | `PublicConst(k.rotate_left(r))` |
 pub fn constant_fold(_expr: &Rc<Expr>) -> Rc<Expr> {
     todo!()
 }
 
 /// Randomly reassociate XOR and AND trees.
 ///
-/// `Xor(Xor(a, b), c)` and `Xor(a, Xor(b, c))` are semantically identical
-/// but produce circuits with different gadget topologies. Applying this before
-/// concretization means two images baked from the same AST but different
-/// reassociations share no recognizable sub-graph shape.
+/// # Algorithm
+///
+/// Bottom-up pass with memo.  At each `Xor` or `And` node, collect the
+/// *flat operand list* for that operator by recursively peeling off nodes of
+/// the same kind (e.g. `Xor(Xor(a, b), c)` → `[a, b, c]`).  Shuffle the
+/// list with `rng`, then fold it back into a random left- or right-skewed
+/// binary tree using `rng.gen_bool(0.5)` to pick left vs. right at each
+/// step.  All other node kinds are traversed but not restructured.
+///
+/// # Why this changes topology
+///
+/// Two calls with different RNG states produce different tree shapes, which
+/// lower to circuits with different gadget indices and pool layouts.  An
+/// attacker comparing two images sees a different sub-graph structure even
+/// though the function is identical.
+///
+/// # Sharing
+///
+/// Use a `HashMap<*const Expr, Rc<Expr>>` memo.  A shared node that appears
+/// in multiple chains is collected into both — the memo ensures it is only
+/// recursively transformed once, but it may appear at different positions in
+/// the two shuffled operand lists.
 pub fn reassociate(_expr: &Rc<Expr>, _rng: &mut impl rand::RngCore) -> Rc<Expr> {
     todo!()
 }
 
-/// Splice in sub-expressions whose value is a compile-time constant so they
-/// evaluate to a known value and are dropped at egress, padding the circuit
-/// shape with inert gadgets an attacker cannot easily identify as decoys.
+/// Splice dead sub-expressions into the tree to pad the circuit with
+/// AND-consuming noise an attacker cannot easily filter out.
 ///
-/// Example: insert `Xor(And(x, PublicConst(0)), y)` which simplifies to `y`
-/// but adds gadgets to the image.
+/// # Decoy form
+///
+/// The canonical decoy is `Xor(e, Xor(And(p, q), And(p, q)))` which equals
+/// `e ^ 0 = e` but adds two AND triples to the image.  `p` and `q` are
+/// drawn from *existing* wires in the expression (collected by a pre-pass)
+/// so the decoy operands are indistinguishable from real operands.
+///
+/// # Algorithm
+///
+/// 1. Pre-pass: collect a pool of candidate wire `Rc<Expr>` nodes (any node
+///    that is not a constant).
+/// 2. For each node in the tree (bottom-up, memo'd), with probability
+///    `decoy_prob` splice in one decoy: choose `p` and `q` at random from
+///    the candidate pool, construct `Xor(node, Xor(And(p,q), And(p,q)))`,
+///    return that as the replacement.
+/// 3. `decoy_prob` defaults to something like 0.15 so a typical circuit
+///    grows by ~15–20% in AND-gate count.
+///
+/// # Interaction with other passes
+///
+/// Run `inject_decoys` *after* `reassociate` so decoy wires blend into the
+/// already-shuffled structure, and run `constant_fold` *after* to eliminate
+/// any trivial constant expressions the decoys might have introduced.
 pub fn inject_decoys(_expr: &Rc<Expr>, _rng: &mut impl rand::RngCore) -> Rc<Expr> {
     todo!()
 }
 
-/// Randomly apply local algebraic identities to change the circuit shape
-/// without changing its semantics.
+/// Randomly apply local algebraic identities at each node.
 ///
-/// Examples:
-/// - `Not(Not(x))` → `x`  (and vice-versa: introduce double-NOT)
-/// - `Or(a, b)` ↔ `Not(And(Not(a), Not(b)))`  (De Morgan)
-/// - `Xor(x, PublicConst(0))` → `x`
+/// # Identities (each applied with independent probability `p ≈ 0.3`)
+///
+/// | Pattern | Replacement | Cost delta |
+/// |---------|-------------|------------|
+/// | `x` | `Not(Not(x))` | free (two XorConst) |
+/// | `Not(Not(x))` | `x` | free |
+/// | `Or(a, b)` | `Not(And(Not(a), Not(b)))` | same triples, different shape |
+/// | `And(a, b)` | `Not(Or(Not(a), Not(b)))` | same triples, different shape |
+/// | `Xor(a, b)` | `Not(Xor(Not(a), b))` | free |
+///
+/// # Algorithm
+///
+/// Recursive bottom-up pass with memo.  At each node, after transforming
+/// children, pick a random subset of applicable identities and apply them.
+/// Multiple identities can stack (e.g. introduce a double-NOT and then
+/// De-Morgan the inner AND), producing deeper variation.
+///
+/// # Interaction with other passes
+///
+/// Run `constant_fold` after `apply_identities` to collapse any
+/// `Not(PublicConst(k))` or `Xor(x, PublicConst(0))` nodes that the
+/// identity rewrites may have introduced.
 pub fn apply_identities(_expr: &Rc<Expr>, _rng: &mut impl rand::RngCore) -> Rc<Expr> {
+    todo!()
+}
+
+/// Apply all structural transforms in sequence to produce a semantically
+/// equivalent but structurally varied expression.
+///
+/// # Pipeline
+///
+/// ```text
+/// constant_fold → reassociate → inject_decoys → apply_identities → constant_fold
+/// ```
+///
+/// The leading `constant_fold` simplifies the input before randomization.
+/// The trailing `constant_fold` cleans up any identity-introduced noise
+/// (e.g. `Not(Not(x))`, `Xor(x, 0)`).
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut structure_rng = StdRng::seed_from_u64(structure_seed);
+/// let rotated  = strong_rotate(&base_ast, &mut structure_rng);
+/// let circuit  = lower_to_circuit(&rotated);
+/// let vm       = ConcreteVm::from_circuit(&circuit, mask_seed);
+/// let source   = emit_rust(&vm, "checksum");
+/// ```
+///
+/// Use a different `structure_seed` for strong rotation (new circuit shape)
+/// or the same `structure_seed` with a different `mask_seed` for cheap
+/// rotation (same shape, fresh baked constants).
+pub fn strong_rotate(_expr: &Rc<Expr>, _rng: &mut impl rand::RngCore) -> Rc<Expr> {
     todo!()
 }
