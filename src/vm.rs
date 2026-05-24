@@ -125,7 +125,7 @@ pub struct Circuit {
     pub(crate) gadgets: Vec<Gadget>, // topological order
     wires: Vec<Wire>,                // indexed by WireId
     generators: Vec<Generator>,
-    egress: WireId,
+    pub(crate) egress: WireId,
 }
 
 impl Circuit {

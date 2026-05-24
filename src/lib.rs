@@ -15,6 +15,7 @@
 
 pub mod expr;
 pub mod expr_transform;
+pub mod circuit_transform;
 pub mod emit;
 #[cfg(feature = "fixture-defs")]
 pub mod fixture_defs;
