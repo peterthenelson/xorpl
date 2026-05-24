@@ -73,7 +73,7 @@ impl Gadget {
         }
     }
 
-    fn input_wires(&self) -> Vec<WireId> {
+    pub(crate) fn input_wires(&self) -> Vec<WireId> {
         match self {
             Gadget::Xor { a, b, .. } | Gadget::And { a, b, .. } => vec![*a, *b],
             Gadget::XorConst { a, .. }
@@ -374,6 +374,7 @@ pub struct BakedGadget {
 pub struct ConcreteVm {
     pub(crate) circuit: Circuit,
     seed: u64,
+    pub(crate) emit_seed: u64, // seeds the register allocator's shuffle in emit_rust
     pub(crate) baked: Vec<BakedGadget>,
     pub(crate) masks: HashMap<WireId, u32>, // NOT shipped — debug / sanity only
     gen_values: HashMap<GenId, u32>, // the sampled randomness (the rotation key)
@@ -394,6 +395,10 @@ impl ConcreteVm {
     pub fn from_circuit(c: &Circuit, seed: u64) -> ConcreteVm {
         c.validate().expect("invalid circuit");
         let mut rng = StdRng::seed_from_u64(seed);
+
+        // Sample the emit seed before anything else so it is independent of
+        // mask-generation details (number of generators, retry count, etc.).
+        let emit_seed: u64 = rng.random();
 
         // Collect the generator ids for secret-carrying wires (Ingest and
         // SecretConst).  Their masks must be non-zero — a zero mask would
@@ -496,6 +501,7 @@ impl ConcreteVm {
         ConcreteVm {
             circuit: c.clone(),
             seed,
+            emit_seed,
             baked,
             masks,
             gen_values,
