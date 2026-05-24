@@ -122,8 +122,8 @@ pub struct Generator {
 
 #[derive(Clone, Debug)]
 pub struct Circuit {
-    gadgets: Vec<Gadget>, // topological order
-    wires: Vec<Wire>,     // indexed by WireId
+    pub(crate) gadgets: Vec<Gadget>, // topological order
+    wires: Vec<Wire>,                // indexed by WireId
     generators: Vec<Generator>,
     egress: WireId,
 }
@@ -366,15 +366,15 @@ impl Builder {
 pub struct BakedGadget {
     idx: usize,
     kind: &'static str,
-    consts: Vec<u32>, // constant-pool entries this gadget references
-    note: String,     // human-readable, for the demo dump
+    pub(crate) consts: Vec<u32>, // constant-pool entries this gadget references
+    note: String,                // human-readable, for the demo dump
 }
 
 #[derive(Debug)]
 pub struct ConcreteVm {
-    circuit: Circuit,
+    pub(crate) circuit: Circuit,
     seed: u64,
-    baked: Vec<BakedGadget>,
+    pub(crate) baked: Vec<BakedGadget>,
     pub(crate) masks: HashMap<WireId, u32>, // NOT shipped — debug / sanity only
     gen_values: HashMap<GenId, u32>, // the sampled randomness (the rotation key)
 }

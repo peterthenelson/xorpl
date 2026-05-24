@@ -14,5 +14,6 @@
 
 pub mod ast;
 pub mod emit;
+pub mod fixture_defs;
 pub mod lower;
 pub mod vm;
