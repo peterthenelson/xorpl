@@ -16,11 +16,14 @@
 //! new fixtures automatically.  When adding a new fixture, add one correctness
 //! test block below and follow the instructions in `src/fixture_defs.rs`.
 
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+
 use xorpl::{
     emit::emit_rust,
     fixture_defs::ALL_FIXTURES,
     lower::lower_to_circuit,
-    vm::ConcreteVm,
+    mask::MaskedCircuit,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,7 +61,7 @@ mod add32_demo {
         let cases: &[(u32, u32)] = &[
             (0, 0),
             (1, 1),
-            (0xFFFF_FFFF, 1),           // wrapping overflow
+            (0xFFFF_FFFF, 1),
             (0x1234_5678, 0x8765_4321),
             (0xDEAD_BEEF, 0xCAFE_BABE),
         ];
@@ -74,11 +77,8 @@ mod mux_demo {
 
     #[test]
     fn gives_right_answer() {
-        // All-ones selects t
         assert_eq!(mux_demo(0xFFFF_FFFF, 0xAAAA_AAAA, 0x5555_5555), 0xAAAA_AAAA);
-        // All-zeros selects f
         assert_eq!(mux_demo(0x0000_0000, 0xAAAA_AAAA, 0x5555_5555), 0x5555_5555);
-        // Mixed cond: bitwise select
         assert_eq!(mux_demo(0xFFFF_0000, 0xDEAD_BEEF, 0xCAFE_BABE), 0xDEAD_BABE);
         assert_eq!(mux_demo(0x0000_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE), 0xCAFE_BEEF);
     }
@@ -102,8 +102,6 @@ mod or_rotl_mux_decoy {
     }
 }
 
-// Reference implementation of the ChaCha quarter-round checksum used by both
-// `chacha_qr` and `chacha_qr_rotated` correctness tests.
 fn chacha_qr_expected(a: u32, b: u32, c: u32, d: u32) -> u32 {
     let a1 = a.wrapping_add(b);
     let d2 = (d ^ a1).rotate_left(16);
@@ -125,16 +123,12 @@ mod chacha_qr {
         let cases: &[(u32, u32, u32, u32)] = &[
             (0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000),
             (0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF),
-            // ChaCha "expand 32-byte k" sigma words
             (0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574),
             (0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321),
         ];
         for &(a, b, c, d) in cases {
-            assert_eq!(
-                chacha_qr(a, b, c, d),
-                expected(a, b, c, d),
-                "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})"
-            );
+            assert_eq!(chacha_qr(a, b, c, d), expected(a, b, c, d),
+                "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})");
         }
     }
 }
@@ -152,25 +146,23 @@ mod chacha_qr_rotated {
             (0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321),
         ];
         for &(a, b, c, d) in cases {
-            assert_eq!(
-                chacha_qr_rotated(a, b, c, d),
-                expected(a, b, c, d),
-                "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})"
-            );
+            assert_eq!(chacha_qr_rotated(a, b, c, d), expected(a, b, c, d),
+                "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})");
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Skew check (automatic — driven by ALL_FIXTURES)
+// Skew check
 // ---------------------------------------------------------------------------
 
 #[test]
 fn fixtures_not_out_of_sync() {
     for def in ALL_FIXTURES {
         let circuit = lower_to_circuit(&def.expr());
-        let vm = ConcreteVm::from_circuit(&circuit, def.seed);
-        let emitted = emit_rust(&vm, def.name);
+        let mut rng = StdRng::seed_from_u64(def.seed);
+        let masked  = MaskedCircuit::from_circuit(&circuit, &mut rng);
+        let emitted = emit_rust(&masked, &circuit, def.name, &mut rng);
 
         let path = format!("tests/fixtures/{}.rs", def.name);
         let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -186,30 +178,22 @@ fn fixtures_not_out_of_sync() {
 }
 
 // ---------------------------------------------------------------------------
-// Structural tests (automatic — driven by ALL_FIXTURES)
+// Structural tests
 // ---------------------------------------------------------------------------
 
 #[test]
 fn structural_properties() {
     for def in ALL_FIXTURES {
         let circuit = lower_to_circuit(&def.expr());
-        let vm = ConcreteVm::from_circuit(&circuit, def.seed);
-        let emitted = emit_rust(&vm, def.name);
+        let mut rng = StdRng::seed_from_u64(def.seed);
+        let masked  = MaskedCircuit::from_circuit(&circuit, &mut rng);
+        let emitted = emit_rust(&masked, &circuit, def.name, &mut rng);
 
-        assert!(
-            emitted.contains("const POOL"),
-            "[{}] emitted source is missing `const POOL`",
-            def.name
-        );
-        assert!(
-            emitted.contains(&format!("pub fn {}(", def.name)),
-            "[{}] emitted source has wrong or missing function name",
-            def.name
-        );
-        assert!(
-            emitted.contains("-> u32"),
-            "[{}] emitted source has wrong return type",
-            def.name
-        );
+        assert!(emitted.contains("const POOL"),
+            "[{}] missing `const POOL`", def.name);
+        assert!(emitted.contains(&format!("pub fn {}(", def.name)),
+            "[{}] wrong or missing function name", def.name);
+        assert!(emitted.contains("-> u32"),
+            "[{}] wrong return type", def.name);
     }
 }

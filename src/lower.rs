@@ -1,15 +1,15 @@
 //! Lowering: `Expr` → `Circuit` via `Builder`.
 //!
 //! This module is the bridge between the expression tree (`expr`) and the
-//! gadget-level circuit (`vm`). It never touches `Gadget`, `Wire`, or
-//! `ConcreteVm` directly — the `Builder` API is the only interface it uses.
+//! gadget-level circuit (`circuit`). It never touches `Gadget`, `Wire`, or
+//! `MaskedCircuit` directly — the `Builder` API is the only interface it uses.
 //!
 //! # Usage
 //!
 //! ```ignore
-//! let expr = Expr::add(Expr::input("nonce"), Expr::input("event"));
+//! let expr    = Expr::add(Expr::input("nonce"), Expr::input("event"));
 //! let circuit = lower_to_circuit(&expr);
-//! let vm = ConcreteVm::from_circuit(&circuit, seed);
+//! let masked  = MaskedCircuit::from_circuit(&circuit, &mut rng);
 //! ```
 //!
 //! # Memoisation and DAG handling
@@ -39,8 +39,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::circuit::{Builder, Circuit, WireId};
 use crate::expr::Expr;
-use crate::vm::{Builder, Circuit, WireId};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -48,7 +48,7 @@ use crate::vm::{Builder, Circuit, WireId};
 
 /// Lower an expression tree to a validated `Circuit`.
 ///
-/// The returned circuit is ready to pass to `ConcreteVm::from_circuit`.
+/// The returned circuit is ready to pass to `MaskedCircuit::from_circuit`.
 pub fn lower_to_circuit(expr: &Rc<Expr>) -> Circuit {
     let mut builder = Builder::new();
     let mut memo: HashMap<*const Expr, WireId> = HashMap::new();
@@ -152,7 +152,7 @@ fn lower_expr(
 mod tests {
     use super::*;
     use crate::expr::Expr;
-    use crate::vm::ConcreteVm;
+    use crate::mask::MaskedCircuit;
 
     fn str_map(inputs: &[(&str, u32)]) -> std::collections::HashMap<String, u32> {
         inputs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
@@ -160,11 +160,13 @@ mod tests {
 
     // Concretize with several seeds and assert every masked eval reveals `expected`.
     fn verify(expr: &Rc<Expr>, inputs: &[(&str, u32)], expected: u32) {
+        use rand::SeedableRng;
         let circuit = lower_to_circuit(expr);
         let input_map = str_map(inputs);
         for seed in 0u64..8 {
-            let vm = ConcreteVm::from_circuit(&circuit, seed);
-            let (_regs, revealed) = vm.eval(&input_map);
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let vm = MaskedCircuit::from_circuit(&circuit, &mut rng);
+            let (_regs, revealed) = vm.eval(&circuit, &input_map);
             assert_eq!(revealed, expected, "seed={seed}");
         }
     }

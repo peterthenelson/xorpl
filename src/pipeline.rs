@@ -8,50 +8,47 @@
 //! # Stage sequence
 //!
 //! ```text
-//! Expr ──strong_rotate──► Expr' ──lower──► Circuit ──inject_remasks──► Circuit' ──from_circuit──► ConcreteVm
+//! Expr ──strong_rotate──► Expr' ──lower──► Circuit ──inject_remasks──► Circuit' ──from_circuit──► MaskedCircuit
 //! ```
 //!
 //! The server receives [`Compilation::circuit`] and verifies checksums by
-//! calling [`Circuit::eval`] directly — it never sees masks or constants.
-//! [`Compilation::emit`] produces the client-side Rust source from
-//! [`Compilation::vm`].
+//! calling [`Circuit::eval`] directly.  [`Compilation::emit`] produces the
+//! client-side Rust source from [`Compilation::masked`].
 
 use std::rc::Rc;
 
 use rand::RngCore;
 
+use crate::circuit::Circuit;
 use crate::circuit_transform::inject_remasks;
 use crate::emit::emit_rust;
 use crate::expr::Expr;
 use crate::expr_transform::strong_rotate;
 use crate::lower::lower_to_circuit;
-use crate::vm::{Circuit, ConcreteVm};
+use crate::mask::MaskedCircuit;
 
 // ---------------------------------------------------------------------------
 // Compilation artifact
 // ---------------------------------------------------------------------------
 
-/// The two artifacts produced by a compilation run.
+/// The artifacts produced by one compilation run.
 pub struct Compilation {
-    /// The expression passed to [`compile`], before any transforms were
-    /// applied.  This is the human-readable definition of the function F;
-    /// both client and server compute the same F, just through different
-    /// representations.
+    /// Pre-transform expression — the canonical definition of F.
     pub original_expr: Rc<Expr>,
-
-    /// The post-transform circuit.  The server mirrors this and calls
-    /// [`Circuit::eval`] to verify client-emitted checksums.
+    /// Post-transform circuit.  The server mirrors this and calls
+    /// [`Circuit::eval`] to verify client checksums.
     pub circuit: Circuit,
-
-    /// The concretized client artifact.  Produced from [`Compilation::circuit`]
-    /// with a concrete seed; contains baked masks, constants, and triples.
-    pub vm: ConcreteVm,
+    /// Concretized client artifact — baked masks, constants, and triples.
+    pub masked: MaskedCircuit,
 }
 
 impl Compilation {
     /// Emit the concretized Rust function named `fn_name`.
-    pub fn emit(&self, fn_name: &str) -> String {
-        emit_rust(&self.vm, fn_name)
+    ///
+    /// `rng` seeds the register-slot shuffle; the caller can use the same RNG
+    /// that was passed to `compile` (continuing the sequence) or a fresh one.
+    pub fn emit(&self, fn_name: &str, rng: &mut impl RngCore) -> String {
+        emit_rust(&self.masked, &self.circuit, fn_name, rng)
     }
 }
 
@@ -65,16 +62,16 @@ impl Compilation {
 /// 1. `strong_rotate` — structural expression-level obfuscation.
 /// 2. `lower_to_circuit` — deterministic lowering to a value graph.
 /// 3. `inject_remasks` at rate 1-in-4 — post-lowering mask re-randomization.
-/// 4. `ConcreteVm::from_circuit` with `seed` — concretization.
+/// 4. `MaskedCircuit::from_circuit` — concretization.
 ///
-/// `rng` drives all stochastic decisions in stages 1 and 3.  Holding `rng`
-/// state and `seed` fixed reproduces identical output for the same `expr`.
-pub fn compile(expr: Rc<Expr>, rng: &mut impl RngCore, seed: u64) -> Compilation {
+/// All randomness comes from `rng`; the caller seeds it however they like.
+/// Holding `rng` state fixed reproduces identical output for the same `expr`.
+pub fn compile(expr: Rc<Expr>, rng: &mut impl RngCore) -> Compilation {
     let transformed = strong_rotate(&expr, rng);
     let circuit     = lower_to_circuit(&transformed);
     let circuit     = inject_remasks(&circuit, rng, 4);
-    let vm          = ConcreteVm::from_circuit(&circuit, seed);
-    Compilation { original_expr: expr, circuit, vm }
+    let masked      = MaskedCircuit::from_circuit(&circuit, rng);
+    Compilation { original_expr: expr, circuit, masked }
 }
 
 // ---------------------------------------------------------------------------
@@ -92,20 +89,17 @@ mod tests {
 
         for pipeline_seed in 0u64..4 {
             let mut rng = rand::rngs::StdRng::seed_from_u64(pipeline_seed);
-            let c = compile(Rc::clone(&expr), &mut rng, pipeline_seed);
+            let c = compile(Rc::clone(&expr), &mut rng);
 
-            // Server path: Circuit::eval agrees with expected.
             let vals = c.circuit.eval(&input_map);
             assert_eq!(vals[&c.circuit.egress], expected,
                 "circuit eval wrong (pipeline_seed={pipeline_seed})");
 
-            // Client path: ConcreteVm reveals the same value.
-            let (_regs, revealed) = c.vm.eval(&input_map);
+            let (_regs, revealed) = c.masked.eval(&c.circuit, &input_map);
             assert_eq!(revealed, expected,
-                "vm eval wrong (pipeline_seed={pipeline_seed})");
+                "masked eval wrong (pipeline_seed={pipeline_seed})");
 
-            // Emitted source compiles to a non-empty string.
-            let src = c.emit("checksum");
+            let src = c.emit("checksum", &mut rng);
             assert!(!src.is_empty());
         }
     }
@@ -143,7 +137,6 @@ mod tests {
         let b4 = Expr::rotl(Expr::xor(b2,         c2.clone()),  7);
         let expr = Expr::xor(Expr::xor(a2, b4), Expr::xor(c2, d4));
 
-        // Compute expected by running the unobfuscated circuit directly.
         let av: u32 = 0x6170_7865;
         let bv: u32 = 0x3320_646e;
         let cv: u32 = 0x7962_2d32;

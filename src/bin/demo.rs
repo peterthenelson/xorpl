@@ -1,4 +1,4 @@
-use xorpl::vm::demo;
+use xorpl::mask::demo;
 
 fn main() {
     demo();

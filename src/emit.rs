@@ -62,7 +62,8 @@
 //! should change to return a `proc_macro2::TokenStream` or a target-specific
 //! IR, keeping the gadget-walking logic intact.
 
-use crate::vm::{Circuit, ConcreteVm, Gadget, WireId};
+use crate::circuit::{Circuit, Gadget, WireId};
+use crate::mask::MaskedCircuit;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -80,22 +81,19 @@ use crate::vm::{Circuit, ConcreteVm, Gadget, WireId};
 ///
 /// Returns a `String` containing a complete Rust source file that can be
 /// written to disk and compiled independently of this crate.
-pub fn emit_rust(vm: &ConcreteVm, fn_name: &str) -> String {
-    use rand::{SeedableRng, rngs::StdRng};
-    let mut emit_rng = StdRng::seed_from_u64(vm.emit_seed);
-    let slot = allocate_registers(&vm.circuit, &mut emit_rng);
+pub fn emit_rust(masked: &MaskedCircuit, circuit: &Circuit, fn_name: &str, rng: &mut impl rand::RngCore) -> String {
+    let slot = allocate_registers(circuit, rng);
 
-    let (pool, pool_starts) = build_pool(vm);
+    let (pool, pool_starts) = build_pool(masked);
 
-    let n_regs = vm.circuit.gadgets.iter()
+    let n_regs = circuit.gadgets.iter()
         .filter_map(|g| g.out())
         .map(|w| slot[w])
         .max()
         .map(|m| m + 1)
         .unwrap_or(0);
 
-    // Derive parameter list from ingest gadgets in topological order.
-    let sig_params = vm.circuit.gadgets.iter()
+    let sig_params = circuit.gadgets.iter()
         .filter_map(|g| if let Gadget::Ingest { name, .. } = g { Some(name.as_str()) } else { None })
         .map(|name| format!("{name}: u32"))
         .collect::<Vec<_>>()
@@ -114,7 +112,7 @@ pub fn emit_rust(vm: &ConcreteVm, fn_name: &str) -> String {
 
     out.push_str(&format!("    let mut r = [0u32; {n_regs}];\n"));
 
-    for (idx, g) in vm.circuit.gadgets.iter().enumerate() {
+    for (idx, g) in circuit.gadgets.iter().enumerate() {
         out.push_str(&emit_gadget(g, pool_starts[idx], &slot));
     }
 
@@ -220,12 +218,12 @@ fn allocate_registers(circuit: &Circuit, rng: &mut impl rand::RngCore) -> Vec<us
 /// Flatten every `BakedGadget::consts` into one pool `Vec` and return a
 /// parallel `Vec` of starting indices so gadget `i`'s constants are
 /// `pool[starts[i]..starts[i+1]]`.
-fn build_pool(vm: &ConcreteVm) -> (Vec<u32>, Vec<usize>) {
+fn build_pool(masked: &MaskedCircuit) -> (Vec<u32>, Vec<usize>) {
     let mut pool = Vec::new();
     let mut starts = Vec::new();
-    for bg in &vm.baked {
+    for mg in masked.baked_consts() {
         starts.push(pool.len());
-        pool.extend_from_slice(&bg.consts);
+        pool.extend_from_slice(mg);
     }
     starts.push(pool.len()); // sentinel
     (pool, starts)

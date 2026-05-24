@@ -621,9 +621,11 @@ pub fn strong_rotate(expr: &Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use crate::circuit::Gadget;
     use crate::expr::Expr;
     use crate::lower::lower_to_circuit;
-    use crate::vm::ConcreteVm;
+    use crate::mask::MaskedCircuit;
 
     fn eval_all_seeds(expr: &Rc<Expr>, inputs: &[(&str, u32)]) -> Vec<u32> {
         let circuit = lower_to_circuit(expr);
@@ -631,8 +633,9 @@ mod tests {
             inputs.iter().map(|&(k, v)| (k.to_string(), v)).collect();
         (0u64..8)
             .map(|seed| {
-                let vm = ConcreteVm::from_circuit(&circuit, seed);
-                vm.eval(&input_map).1
+                let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+                let vm = MaskedCircuit::from_circuit(&circuit, &mut rng);
+                vm.eval(&circuit, &input_map).1
             })
             .collect()
     }
@@ -833,7 +836,7 @@ mod tests {
         let base = lower_to_circuit(&expr)
             .gadgets
             .iter()
-            .filter(|g| matches!(g, crate::vm::Gadget::And { .. }))
+            .filter(|g| matches!(g, Gadget::And { .. }))
             .count();
         let mut saw_more = false;
         let mut rng = seeded_rng(0);
@@ -842,7 +845,7 @@ mod tests {
             let n = lower_to_circuit(&r)
                 .gadgets
                 .iter()
-                .filter(|g| matches!(g, crate::vm::Gadget::And { .. }))
+                .filter(|g| matches!(g, Gadget::And { .. }))
                 .count();
             if n > base { saw_more = true; break; }
         }

@@ -3,7 +3,7 @@
 //! Each transform takes a `&Circuit` and returns a new `Circuit` with the same
 //! functional semantics.  Transforms are applied after lowering and before
 //! concretization; the result is what both the server mirrors and
-//! `ConcreteVm::from_circuit` consumes.
+//! `MaskedCircuit::from_circuit` consumes.
 //!
 //! # Implementation pattern
 //!
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use rand::RngCore;
 
-use crate::vm::{Builder, Circuit, Gadget, WireId};
+use crate::circuit::{Builder, Circuit, Gadget, WireId};
 
 // ---------------------------------------------------------------------------
 // inject_remasks
@@ -114,23 +114,21 @@ mod tests {
 
     use crate::expr::Expr;
     use crate::lower::lower_to_circuit;
-    use crate::vm::ConcreteVm;
+    use crate::mask::MaskedCircuit;
 
     fn verify_transform(circuit: &Circuit, transformed: &Circuit, inputs: &[(&str, u32)], expected: u32) {
         let input_map: HashMap<String, u32> = inputs.iter().map(|&(k, v)| (k.to_string(), v)).collect();
 
-        // Original circuit still computes correctly.
         let orig_vals = circuit.eval(&input_map);
         assert_eq!(orig_vals[&circuit.egress], expected, "original circuit wrong");
 
-        // Transformed circuit computes the same value.
         let new_vals = transformed.eval(&input_map);
         assert_eq!(new_vals[&transformed.egress], expected, "transformed circuit wrong");
 
-        // Transformed circuit concretizes and evals correctly under several seeds.
         for seed in 0u64..4 {
-            let vm = ConcreteVm::from_circuit(transformed, seed);
-            let (_regs, revealed) = vm.eval(&input_map);
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let vm = MaskedCircuit::from_circuit(transformed, &mut rng);
+            let (_regs, revealed) = vm.eval(transformed, &input_map);
             assert_eq!(revealed, expected, "concretized transformed circuit wrong (seed={seed})");
         }
     }
