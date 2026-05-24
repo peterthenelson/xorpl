@@ -35,13 +35,16 @@
 //! same seed but different transformed ASTs produce images with different
 //! shapes, not just different constants.
 //!
-//! Planned transforms (all stubs for now):
-//! - `constant_fold`   — evaluate constant sub-expressions at compile time
-//! - `reassociate`     — reorder XOR/AND trees to change gadget topology
-//! - `inject_decoys`   — splice in sub-expressions that evaluate to a constant
-//!                       and are dropped at egress; pads the circuit shape
-//! - `apply_identity`  — randomly apply algebraic identities
-//!                       (double-NOT, De Morgan, etc.)
+//! Available transforms:
+//! - `constant_fold`    — evaluate constant sub-expressions at compile time
+//! - `reassociate`      — flatten XOR/AND chains, shuffle operands, re-bracket
+//! - `inject_decoys`    — splice in dead sub-expressions (XOR-zero or MUX dead
+//!                        branch) that pad the circuit with AND-triple noise
+//! - `apply_identities` — randomly apply algebraic identities
+//!                        (double-NOT, De Morgan, XOR flip)
+//! - `strong_rotate`    — pipeline entry point:
+//!                        `constant_fold → reassociate → inject_decoys
+//!                         → apply_identities → constant_fold`
 
 use std::rc::Rc;
 

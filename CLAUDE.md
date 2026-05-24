@@ -88,12 +88,26 @@ Runs 200 concretizations × 20 random inputs (4,000 total masked executions). As
 
 ## Word-Level Optimization
 
-Word-level AND (operating on u32) reduces the triple cost versus bit-level AND: ~31 triples per word-AND vs. ~61 for bit-level. The compiler chooses word vs. bit-level lowering during optimization.
+`Builder::add32` uses a word-level generate optimization: one AND triple for all 32 generate bits, plus 30 triples for the carry-propagate chain — 31 triples total versus ~61 for a naive bit-serial adder.
 
 ## Rotation
 
 **Cheap rotation**: re-run concretization with a new seed (same structure, fresh constants).  
-**Strong rotation**: also re-randomize structure (reassociate trees, reorder gadgets, swap lowerings, add decoys) so successive images share no recognizable patterns.
+**Strong rotation**: also re-randomize the AST structure via `ast::strong_rotate` before lowering, so successive images share no recognizable patterns.
+
+### AST Transforms (`src/ast.rs`)
+
+`strong_rotate` pipelines four passes:
+
+| Pass | What it does |
+|------|-------------|
+| `constant_fold` | Evaluate constant sub-expressions; simplify identities (`x^0=x`, `x&0=0`, etc.) |
+| `reassociate` | Flatten XOR/AND chains, shuffle operand order, re-bracket randomly |
+| `inject_decoys` | Splice dead sub-expressions — XOR-zero (`e^(p&q)^(p&q)`) or MUX dead-branch (`mux(secret_const(0xFFFF_FFFF), e, And(p,q))`) — to pad AND-triple count |
+| `apply_identities` | Randomly apply De Morgan, double-NOT introduction/removal, XOR flip |
+| `constant_fold` | Clean up any noise the identity rewrites introduced |
+
+`decoy_xor_zero` and `decoy_mux` are also exposed as standalone public helpers for deterministic decoy construction (used directly in fixture builders).
 
 ## Stack
 

@@ -172,7 +172,13 @@ impl Circuit {
         v
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    /// Internal consistency check. `Circuit` is a plain data type; callers are
+    /// not expected to call this directly. `Builder::build` is the canonical
+    /// enforcement point — it calls `validate` after assembling the circuit and
+    /// panics on failure, so a valid `Circuit` can only be produced through
+    /// `Builder`. `ConcreteVm::from_circuit` calls it as a defensive assertion
+    /// on circuits it receives.
+    pub(crate) fn validate(&self) -> Result<(), String> {
         let nw = self.wires.len();
         let ng = self.generators.len();
 
@@ -347,6 +353,11 @@ impl Builder {
     }
 
     /// Finalise the circuit, marking `result` as the egress wire.
+    ///
+    /// This is the sole intended way to produce a `Circuit`. All structural
+    /// invariants (wire/generator ID ranges, single-write rule, egress
+    /// constraints) are enforced here; the panic is intentional — a bug in
+    /// a builder call is a programming error, not a runtime condition.
     pub fn build(mut self, result: WireId) -> Circuit {
         self.wires[result] = Wire::Egress;
         self.gadgets.push(Gadget::Egress { a: result });
