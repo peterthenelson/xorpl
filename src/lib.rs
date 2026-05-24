@@ -3,15 +3,14 @@
 //! # Pipeline
 //!
 //! ```text
-//! Expr  ──lower()──►  Circuit  ──ConcreteVm::from_circuit()──►  ConcreteVm  ──emit()──►  Rust source
-//!  │                    │
-//! expr.rs            vm.rs (also owns Builder)
-//! expr_transform.rs  emit.rs reads ConcreteVm
-//! lower.rs
+//! Expr ──expr_transform──► Expr' ──lower──► Circuit ──circuit_transform──► Circuit' ──from_circuit──► ConcreteVm ──emit──► Rust
 //! ```
 //!
-//! The server mirrors only the `Circuit` (value graph) and calls
-//! `Circuit::eval()` to verify checksums — it never sees masks or constants.
+//! [`pipeline::compile`] wires the standard stages together.  Each module can
+//! also be called directly for testing or partial pipelines.
+//!
+//! The server mirrors [`Circuit`] and calls [`Circuit::eval`] to verify
+//! checksums — it never sees masks or constants.
 
 pub mod expr;
 pub mod expr_transform;
@@ -20,4 +19,5 @@ pub mod emit;
 #[cfg(feature = "fixture-defs")]
 pub mod fixture_defs;
 pub mod lower;
+pub mod pipeline;
 pub mod vm;
