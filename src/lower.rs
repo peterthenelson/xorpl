@@ -15,12 +15,14 @@
 //! # Memoisation and DAG handling
 //!
 //! `Rc<Expr>` nodes can be shared (a state word used twice in a ChaCha round
-//! appears as the same `Rc`). The lowering pass keeps a
-//! `HashMap<*const Expr, WireId>` keyed on `Rc::as_ptr`. When it encounters a
-//! node it has already lowered, it returns the cached `WireId` instead of
-//! emitting duplicate gadgets. Duplicate output wires would fail
-//! `Circuit::validate()`, so this memoisation is required for correctness, not
-//! just performance.
+//! appears as the same `Rc`). The lowering pass keeps two dedup maps:
+//!
+//! - `memo: HashMap<*const Expr, WireId>` — keyed on `Rc::as_ptr`.  Avoids
+//!   re-emitting gadgets for any shared `Rc` node.
+//! - `ingest_map: HashMap<String, WireId>` — keyed on input name.  Ensures
+//!   that two separately-constructed `Expr::Input("a")` nodes (different `Rc`s,
+//!   same name) map to the same `Gadget::Ingest` rather than producing two
+//!   ingests with different masks.
 //!
 //! # Expansions
 //!
@@ -33,10 +35,6 @@
 //! | `Not(a)` | `XorConst(a, 0xffff_ffff)` — free, no triple |
 //! | `Add(a, b)` | `Builder::add32(a, b)` — 31 triples |
 //! | `Mux{c,t,f}` | `Xor(f, And(c, Xor(t, f)))` — 1 triple |
-//!
-//! `Ingest` nodes with the same name share one `Gadget::Ingest` (also via the
-//! memo map), so writing `Expr::input("a")` twice in an expression does not
-//! produce two ingests.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -50,27 +48,31 @@ use crate::vm::{Builder, Circuit, WireId};
 
 /// Lower an expression tree to a validated `Circuit`.
 ///
-/// `result` is the wire whose value will be revealed at egress.
 /// The returned circuit is ready to pass to `ConcreteVm::from_circuit`.
 pub fn lower_to_circuit(expr: &Rc<Expr>) -> Circuit {
-    let mut builder  = Builder::new();
+    let mut builder = Builder::new();
     let mut memo: HashMap<*const Expr, WireId> = HashMap::new();
-    let result = lower_expr(expr, &mut builder, &mut memo);
+    let mut ingest_map: HashMap<String, WireId> = HashMap::new();
+    let result = lower_expr(expr, &mut builder, &mut memo, &mut ingest_map);
     builder.build(result)
 }
 
 // ---------------------------------------------------------------------------
-// Recursive lowering (stub)
+// Recursive lowering
 // ---------------------------------------------------------------------------
 
-/// Recursively lower one expression node, using `memo` to avoid re-emitting
-/// shared nodes. Returns the `WireId` of the node's output wire.
+/// Recursively lower one expression node.  Returns the `WireId` of the
+/// node's output wire.
+///
+/// `memo` deduplicates on `Rc` pointer identity.  `ingest_map` additionally
+/// deduplicates named inputs by name, so two separately-created
+/// `Expr::Input("a")` nodes share one `Gadget::Ingest`.
 fn lower_expr(
-    expr:    &Rc<Expr>,
-    builder: &mut Builder,
-    memo:    &mut HashMap<*const Expr, WireId>,
+    expr:       &Rc<Expr>,
+    builder:    &mut Builder,
+    memo:       &mut HashMap<*const Expr, WireId>,
+    ingest_map: &mut HashMap<String, WireId>,
 ) -> WireId {
-    // Check memo before doing any work.
     let ptr = Rc::as_ptr(expr);
     if let Some(&wire) = memo.get(&ptr) {
         return wire;
@@ -78,50 +80,60 @@ fn lower_expr(
 
     let wire = match expr.as_ref() {
         // --- sources ---
-        Expr::Input(name)       => builder.ingest(name),
-        Expr::PublicConst(k)    => builder.public_const(*k),
-        Expr::SecretConst(k)    => builder.secret_const(*k),
+        Expr::Input(name) => {
+            // Deduplicate by name so that separately-constructed Input nodes
+            // with the same name share one ingest gadget (and one mask).
+            if let Some(&existing) = ingest_map.get(name.as_str()) {
+                existing
+            } else {
+                let w = builder.ingest(name);
+                ingest_map.insert(name.clone(), w);
+                w
+            }
+        }
+        Expr::PublicConst(k) => builder.public_const(*k),
+        Expr::SecretConst(k) => builder.secret_const(*k),
 
         // --- direct gadget mappings ---
         Expr::Xor(a, b) => {
-            let wa = lower_expr(a, builder, memo);
-            let wb = lower_expr(b, builder, memo);
+            let wa = lower_expr(a, builder, memo, ingest_map);
+            let wb = lower_expr(b, builder, memo, ingest_map);
             builder.xor(wa, wb)
         }
         Expr::And(a, b) => {
-            let wa = lower_expr(a, builder, memo);
-            let wb = lower_expr(b, builder, memo);
+            let wa = lower_expr(a, builder, memo, ingest_map);
+            let wb = lower_expr(b, builder, memo, ingest_map);
             builder.and(wa, wb)
         }
         Expr::Rotl(a, r) => {
-            let wa = lower_expr(a, builder, memo);
+            let wa = lower_expr(a, builder, memo, ingest_map);
             builder.rotl(wa, *r)
         }
 
         // --- expansions ---
         Expr::Or(a, b) => {
             // a | b  =  (a ^ b) ^ (a & b)
-            let wa = lower_expr(a, builder, memo);
-            let wb = lower_expr(b, builder, memo);
+            let wa = lower_expr(a, builder, memo, ingest_map);
+            let wb = lower_expr(b, builder, memo, ingest_map);
             let xor_ab = builder.xor(wa, wb);
             let and_ab = builder.and(wa, wb);
             builder.xor(xor_ab, and_ab)
         }
         Expr::Not(a) => {
             // !a  =  a ^ 0xffff_ffff  (free: mask propagates linearly)
-            let wa = lower_expr(a, builder, memo);
+            let wa = lower_expr(a, builder, memo, ingest_map);
             builder.xor_const(wa, 0xffff_ffff)
         }
         Expr::Add(a, b) => {
-            let wa = lower_expr(a, builder, memo);
-            let wb = lower_expr(b, builder, memo);
+            let wa = lower_expr(a, builder, memo, ingest_map);
+            let wb = lower_expr(b, builder, memo, ingest_map);
             builder.add32(wa, wb)
         }
         Expr::Mux { cond, on_true, on_false } => {
             // select(c, t, f)  =  f ^ (c & (t ^ f))  — 1 triple
-            let wc = lower_expr(cond, builder, memo);
-            let wt = lower_expr(on_true, builder, memo);
-            let wf = lower_expr(on_false, builder, memo);
+            let wc = lower_expr(cond, builder, memo, ingest_map);
+            let wt = lower_expr(on_true, builder, memo, ingest_map);
+            let wf = lower_expr(on_false, builder, memo, ingest_map);
             let diff   = builder.xor(wt, wf);
             let masked = builder.and(wc, diff);
             builder.xor(wf, masked)
@@ -192,27 +204,35 @@ mod tests {
         let t = Expr::input("t");
         let f = Expr::input("f");
         let expr = Expr::mux(c.clone(), t.clone(), f.clone());
-        // all-ones selects on_true
         verify(&expr, &[("c", 0xFFFF_FFFF), ("t", 0xAAAA_AAAA), ("f", 0x5555_5555)], 0xAAAA_AAAA);
-        // all-zeros selects on_false
         verify(&expr, &[("c", 0x0000_0000), ("t", 0xAAAA_AAAA), ("f", 0x5555_5555)], 0x5555_5555);
-        // bitwise: alternating bits select alternating halves
         verify(&expr, &[("c", 0xFFFF_0000), ("t", 0xDEAD_BEEF), ("f", 0xCAFE_BABE)], 0xDEAD_BABE);
     }
 
     #[test]
     fn shared_node_not_duplicated() {
-        // `a` appears as both inputs to XOR — memoisation must not emit two ingests.
         let a = Expr::input("a");
         let expr = Expr::xor(a.clone(), a.clone());
-        // x ^ x == 0 for any x
         verify(&expr, &[("a", 0x1234_5678)], 0);
         verify(&expr, &[("a", 0xFFFF_FFFF)], 0);
     }
 
     #[test]
+    fn separate_rc_same_name_shares_ingest() {
+        // Two independently-created Expr::Input("a") must map to the same
+        // ingest gadget, not produce two separate masked copies.
+        let a1 = Expr::input("a");
+        let a2 = Expr::input("a"); // different Rc, same name
+        assert!(!std::rc::Rc::ptr_eq(&a1, &a2));
+        let expr = Expr::xor(a1, a2);
+        // x ^ x == 0 for any x (only holds if both sides are the same wire)
+        verify(&expr, &[("a", 0x1234_5678)], 0);
+        verify(&expr, &[("a", 0xFFFF_FFFF)], 0);
+        verify(&expr, &[("a", 0xDEAD_BEEF)], 0);
+    }
+
+    #[test]
     fn composed_or_not() {
-        // De Morgan: !(a | b)  ==  !a & !b
         let a = Expr::input("a");
         let b = Expr::input("b");
         let lhs = Expr::not(Expr::or(a.clone(), b.clone()));
@@ -225,13 +245,12 @@ mod tests {
 
     #[test]
     fn full_pipeline_example() {
-        // F(a, b) = rotl((a | b) ^ C, 5)  — the demo circuit, via ast/lower
         let a = Expr::input("a");
         let b = Expr::input("b");
         let c = Expr::secret_const(0x9e37_79b9);
-        let or_ab  = Expr::or(a.clone(), b.clone());
-        let xor_c  = Expr::xor(or_ab, c);
-        let expr   = Expr::rotl(xor_c, 5);
+        let or_ab = Expr::or(a.clone(), b.clone());
+        let xor_c = Expr::xor(or_ab, c);
+        let expr  = Expr::rotl(xor_c, 5);
 
         let av: u32 = 0x1234_5678;
         let bv: u32 = 0xDEAD_BEEF;

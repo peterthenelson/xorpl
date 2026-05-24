@@ -26,7 +26,7 @@ fn main() {
     for def in ALL_FIXTURES {
         let circuit = lower_to_circuit(&(def.build)());
         let vm = ConcreteVm::from_circuit(&circuit, def.seed);
-        let source = emit_rust(&vm, def.name, def.param_names);
+        let source = emit_rust(&vm, def.name);
 
         let path = format!("tests/fixtures/{}.rs", def.name);
         std::fs::write(&path, &source)

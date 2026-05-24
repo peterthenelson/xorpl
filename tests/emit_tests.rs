@@ -3,17 +3,14 @@
 //! Test categories:
 //!
 //! - **Correctness** (`*::gives_right_answer`): include the committed fixture
-//!   source and call the emitted function on known inputs.  Marked `#[ignore]`
-//!   until the fixture file is populated — run `cargo run --bin regen_fixtures`
-//!   and then remove the `#[ignore]`.
+//!   source and call the emitted function on known inputs.
 //!
 //! - **Skew check** (`fixtures_not_out_of_sync`): re-emit every fixture and
-//!   assert the output matches the file on disk.  Catches regenerating the
-//!   emitter without regenerating the fixtures.
+//!   assert the output matches the file on disk.  Catches changing the emitter
+//!   without regenerating the fixtures.
 //!
 //! - **Structural** (`structural_properties`): check properties of the emitted
-//!   string (function signature, POOL constant, param names) without needing
-//!   to compile the output.
+//!   string (function signature, POOL constant) without needing to compile it.
 //!
 //! The skew check and structural tests iterate over `ALL_FIXTURES` and pick up
 //! new fixtures automatically.  When adding a new fixture, add one correctness
@@ -30,8 +27,9 @@ use xorpl::{
 // Correctness tests
 //
 // One module per fixture.  When adding a new fixture:
-//   1. Add a `mod <name> { include!(...); #[test] ... }` block here.
-//   2. Remove #[ignore] after running `cargo run --bin regen_fixtures`.
+//   1. Add a placeholder file at tests/fixtures/<name>.rs
+//   2. Add a `mod <name> { include!(...); #[test] fn gives_right_answer() { ... } }` block here.
+//   3. Run `cargo run --bin regen_fixtures` then remove any #[ignore].
 // ---------------------------------------------------------------------------
 
 mod or_rotl_demo {
@@ -52,6 +50,40 @@ mod or_rotl_demo {
     }
 }
 
+mod add32_demo {
+    include!("fixtures/add32_demo.rs");
+
+    #[test]
+    fn gives_right_answer() {
+        let cases: &[(u32, u32)] = &[
+            (0, 0),
+            (1, 1),
+            (0xFFFF_FFFF, 1),           // wrapping overflow
+            (0x1234_5678, 0x8765_4321),
+            (0xDEAD_BEEF, 0xCAFE_BABE),
+        ];
+        for &(a, b) in cases {
+            let expected = a.wrapping_add(b);
+            assert_eq!(add32_demo(a, b), expected, "inputs ({a:#010x}, {b:#010x})");
+        }
+    }
+}
+
+mod mux_demo {
+    include!("fixtures/mux_demo.rs");
+
+    #[test]
+    fn gives_right_answer() {
+        // All-ones selects t
+        assert_eq!(mux_demo(0xFFFF_FFFF, 0xAAAA_AAAA, 0x5555_5555), 0xAAAA_AAAA);
+        // All-zeros selects f
+        assert_eq!(mux_demo(0x0000_0000, 0xAAAA_AAAA, 0x5555_5555), 0x5555_5555);
+        // Mixed cond: bitwise select
+        assert_eq!(mux_demo(0xFFFF_0000, 0xDEAD_BEEF, 0xCAFE_BABE), 0xDEAD_BABE);
+        assert_eq!(mux_demo(0x0000_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE), 0xCAFE_BEEF);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Skew check (automatic — driven by ALL_FIXTURES)
 // ---------------------------------------------------------------------------
@@ -61,7 +93,7 @@ fn fixtures_not_out_of_sync() {
     for def in ALL_FIXTURES {
         let circuit = lower_to_circuit(&(def.build)());
         let vm = ConcreteVm::from_circuit(&circuit, def.seed);
-        let emitted = emit_rust(&vm, def.name, def.param_names);
+        let emitted = emit_rust(&vm, def.name);
 
         let path = format!("tests/fixtures/{}.rs", def.name);
         let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -85,7 +117,7 @@ fn structural_properties() {
     for def in ALL_FIXTURES {
         let circuit = lower_to_circuit(&(def.build)());
         let vm = ConcreteVm::from_circuit(&circuit, def.seed);
-        let emitted = emit_rust(&vm, def.name, def.param_names);
+        let emitted = emit_rust(&vm, def.name);
 
         assert!(
             emitted.contains("const POOL"),
@@ -102,12 +134,5 @@ fn structural_properties() {
             "[{}] emitted source has wrong return type",
             def.name
         );
-        for p in def.param_names {
-            assert!(
-                emitted.contains(p),
-                "[{}] param `{p}` missing from emitted signature",
-                def.name
-            );
-        }
     }
 }

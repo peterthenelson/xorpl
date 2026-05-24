@@ -395,11 +395,28 @@ impl ConcreteVm {
         c.validate().expect("invalid circuit");
         let mut rng = StdRng::seed_from_u64(seed);
 
-        // (4) sample every independent generator; GenId == index in c.generators
-        let mut gen_values: HashMap<GenId, u32> = HashMap::new();
-        for (id, _) in c.generators.iter().enumerate() {
-            gen_values.insert(id, rng.random());
-        }
+        // Collect the generator ids for secret-carrying wires (Ingest and
+        // SecretConst).  Their masks must be non-zero — a zero mask would
+        // expose the secret value in the baked constants or registers.
+        let secret_gens: Vec<GenId> = c.gadgets.iter()
+            .filter_map(|g| match g {
+                Gadget::Ingest { gen, .. } | Gadget::SecretConst { gen, .. } => Some(*gen),
+                _ => None,
+            })
+            .collect();
+
+        // Sample every generator, retrying until all secret masks are non-zero.
+        // The probability of needing a retry is at most |secret_gens| / 2^32
+        // per attempt, so this loop almost always terminates in one iteration.
+        let gen_values: HashMap<GenId, u32> = loop {
+            let mut gv: HashMap<GenId, u32> = HashMap::new();
+            for (id, _) in c.generators.iter().enumerate() {
+                gv.insert(id, rng.random());
+            }
+            if secret_gens.iter().all(|g| gv[g] != 0) {
+                break gv;
+            }
+        };
 
         let mut masks: HashMap<WireId, u32> = HashMap::new();
         let mut baked: Vec<BakedGadget> = Vec::new();
