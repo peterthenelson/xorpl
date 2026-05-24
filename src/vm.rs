@@ -255,6 +255,12 @@ impl Builder {
         out
     }
 
+    pub fn public_const(&mut self, k: u32) -> WireId {
+        let out = self.alloc_wire(Wire::Internal);
+        self.gadgets.push(Gadget::PublicConst { k, out });
+        out
+    }
+
     pub fn secret_const(&mut self, k: u32) -> WireId {
         let gen = self.alloc_gen("secret const");
         let out = self.alloc_wire(Wire::Internal);
@@ -265,6 +271,12 @@ impl Builder {
     pub fn xor(&mut self, a: WireId, b: WireId) -> WireId {
         let out = self.alloc_wire(Wire::Internal);
         self.gadgets.push(Gadget::Xor { a, b, out });
+        out
+    }
+
+    pub fn xor_const(&mut self, a: WireId, k: u32) -> WireId {
+        let out = self.alloc_wire(Wire::Internal);
+        self.gadgets.push(Gadget::XorConst { a, k, out });
         out
     }
 
@@ -284,6 +296,13 @@ impl Builder {
         let gen = self.alloc_gen("AND");
         let out = self.alloc_wire(Wire::Internal);
         self.gadgets.push(Gadget::And { a, b, gen, out });
+        out
+    }
+
+    pub fn remask(&mut self, a: WireId) -> WireId {
+        let gen = self.alloc_gen("remask");
+        let out = self.alloc_wire(Wire::Internal);
+        self.gadgets.push(Gadget::Remask { a, gen, out });
         out
     }
 
@@ -588,6 +607,99 @@ mod tests {
     // Independent reference so the test doesn't share code with the circuit builder.
     fn expected_f(a: u32, b: u32) -> u32 {
         ((a | b) ^ 0x9e3779b9_u32).rotate_left(5)
+    }
+
+    fn single_input(a: u32) -> HashMap<String, u32> {
+        HashMap::from([("a".to_string(), a)])
+    }
+
+    // PublicConst: value is k and mask is always 0 (server can see it in plain).
+    #[test]
+    fn public_const_has_zero_mask() {
+        let mut b = Builder::new();
+        let k_wire = b.public_const(0x12345678);
+        let c = b.build(k_wire);
+        let mut rng = StdRng::seed_from_u64(0x1111);
+        for _ in 0..20 {
+            let seed: u64 = rng.random();
+            let vm = ConcreteVm::from_circuit(&c, seed);
+            assert_eq!(vm.masks[&k_wire], 0, "PublicConst mask should be 0 (seed={:#x})", seed);
+            let (_, revealed) = vm.eval(&HashMap::new());
+            assert_eq!(revealed, 0x12345678);
+        }
+    }
+
+    // XorConst: F(a) = a ^ K.
+    #[test]
+    fn xor_const_computes_correctly() {
+        const K: u32 = 0xdeadbeef;
+        let mut b = Builder::new();
+        let wa = b.ingest("a");
+        let result = b.xor_const(wa, K);
+        let c = b.build(result);
+        let mut rng = StdRng::seed_from_u64(0x2222);
+        for _ in 0..20 {
+            let seed: u64 = rng.random();
+            let vm = ConcreteVm::from_circuit(&c, seed);
+            for _ in 0..20 {
+                let a: u32 = rng.random();
+                let (_, revealed) = vm.eval(&single_input(a));
+                assert_eq!(revealed, a ^ K, "XorConst mismatch (seed={:#x})", seed);
+            }
+        }
+    }
+
+    // AndConst: F(a) = a & K.
+    #[test]
+    fn and_const_computes_correctly() {
+        const K: u32 = 0x0f0f0f0f;
+        let mut b = Builder::new();
+        let wa = b.ingest("a");
+        let result = b.and_const(wa, K);
+        let c = b.build(result);
+        let mut rng = StdRng::seed_from_u64(0x3333);
+        for _ in 0..20 {
+            let seed: u64 = rng.random();
+            let vm = ConcreteVm::from_circuit(&c, seed);
+            for _ in 0..20 {
+                let a: u32 = rng.random();
+                let (_, revealed) = vm.eval(&single_input(a));
+                assert_eq!(revealed, a & K, "AndConst mismatch (seed={:#x})", seed);
+            }
+        }
+    }
+
+    // Remask: identity on values, rerandomises the mask.
+    #[test]
+    fn remask_preserves_value() {
+        let mut b = Builder::new();
+        let wa = b.ingest("a");
+        let remasked = b.remask(wa);
+        let c = b.build(remasked);
+        let mut rng = StdRng::seed_from_u64(0x4444);
+        for _ in 0..20 {
+            let seed: u64 = rng.random();
+            let vm = ConcreteVm::from_circuit(&c, seed);
+            for _ in 0..20 {
+                let a: u32 = rng.random();
+                let inputs = single_input(a);
+                let values = c.eval(&inputs);
+                let (regs, revealed) = vm.eval(&inputs);
+                // value identity
+                assert_eq!(revealed, a, "Remask changed the value (seed={:#x})", seed);
+                // register invariant on the remasked wire
+                assert_eq!(
+                    regs[&remasked],
+                    values[&remasked] ^ vm.masks[&remasked],
+                    "Remask wire reg != value^mask (seed={:#x})", seed,
+                );
+                // the mask did actually change (almost surely — p(collision) = 2^-32 per trial)
+                assert_ne!(
+                    vm.masks[&remasked], vm.masks[&wa],
+                    "Remask left the mask unchanged (seed={:#x})", seed,
+                );
+            }
+        }
     }
 
     // Structural: each AND gate owns a unique generator => triples never reused.
