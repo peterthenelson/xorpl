@@ -26,7 +26,7 @@
 //! | `Not` | Expanded to `XorConst(a, 0xffff_ffff)` |
 //! | `Add` | Expanded to `Builder::add32` (31 triples, word-level opt.) |
 //! | `Rotl` | Free |
-//! | `Mux` | Expanded to `Xor(f, And(Not(c), Xor(t, f)))` |
+//! | `Mux` | Expanded to `Xor(f, And(c, Xor(t, f)))` |
 //!
 //! # Transformations
 //!
@@ -77,7 +77,7 @@ pub enum Expr {
 
     // --- control flow (if-converted) ---
     /// Bitwise select: `cond & on_true | ~cond & on_false`.
-    /// Lowered to `Xor(on_false, And(Not(cond), Xor(on_true, on_false)))`.
+    /// Lowered to `Xor(on_false, And(cond, Xor(on_true, on_false)))`.
     /// `cond` is treated as a full 32-bit mask (all-ones = true, all-zeros =
     /// false); single-bit predicates should be broadcast before use.
     Mux {
