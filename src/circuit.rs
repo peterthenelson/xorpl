@@ -193,7 +193,7 @@ impl Circuit {
     }
 
     /// Evaluate the unmasked function F (server-side spec).
-    pub(crate) fn eval(&self, inputs: &HashMap<String, u32>) -> HashMap<WireId, u32> {
+    pub fn eval(&self, inputs: &HashMap<String, u32>) -> HashMap<WireId, u32> {
         let mut v: HashMap<WireId, u32> = HashMap::new();
         for g in &self.gadgets {
             match g {

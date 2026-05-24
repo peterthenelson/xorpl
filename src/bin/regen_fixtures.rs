@@ -15,7 +15,8 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use xorpl::{
-    emit::emit_rust,
+    emit::{emit_rust, emit_verifier_rust},
+    expr::Expr,
     fixture_defs::ALL_FIXTURES,
     lower::lower_to_circuit,
     mask::MaskedCircuit,
@@ -23,6 +24,8 @@ use xorpl::{
 
 fn main() {
     let mut wrote = 0usize;
+
+    // Browser (obfuscated) fixtures.
     for def in ALL_FIXTURES {
         let circuit = lower_to_circuit(&def.expr());
         let mut rng = StdRng::seed_from_u64(def.seed);
@@ -35,5 +38,22 @@ fn main() {
         println!("wrote {path}");
         wrote += 1;
     }
+
+    // Server (verifier) fixtures.
+    {
+        let a = Expr::input("a");
+        let b = Expr::input("b");
+        let c = Expr::secret_const(0x9e37_79b9);
+        let expr = Expr::rotl(Expr::xor(Expr::or(a, b), c), 5);
+        let circuit = lower_to_circuit(&expr);
+        let source  = emit_verifier_rust(&circuit, "or_rotl_demo_verify");
+
+        let path = "tests/fixtures/or_rotl_demo_verifier.rs";
+        std::fs::write(path, &source)
+            .unwrap_or_else(|e| panic!("failed to write {path}: {e}"));
+        println!("wrote {path}");
+        wrote += 1;
+    }
+
     println!("{wrote} fixture(s) written — commit the updated files");
 }

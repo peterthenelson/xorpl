@@ -1,3 +1,4 @@
+#![allow(dead_code)] // ROTATION_TAG in fixture includes is used by the skew check, not the correctness modules
 //! Integration tests for the emit pipeline.
 //!
 //! Test categories:
@@ -19,13 +20,8 @@
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use xorpl::{
-    emit::{emit_rust, emit_verifier_rust},
-    expr::Expr,
-    fixture_defs::ALL_FIXTURES,
-    lower::lower_to_circuit,
-    mask::MaskedCircuit,
-};
+use xorpl::prelude::*;
+use xorpl::fixture_defs::ALL_FIXTURES;
 
 // ---------------------------------------------------------------------------
 // Correctness tests
@@ -234,6 +230,8 @@ fn structural_properties() {
         let masked  = MaskedCircuit::from_circuit(&circuit, &mut rng);
         let emitted = emit_rust(&masked, &circuit, def.name, &mut rng);
 
+        assert!(emitted.contains("pub const ROTATION_TAG"),
+            "[{}] missing `pub const ROTATION_TAG`", def.name);
         assert!(emitted.contains("const POOL"),
             "[{}] missing `const POOL`", def.name);
         assert!(emitted.contains(&format!("pub fn {}(", def.name)),

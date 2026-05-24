@@ -68,6 +68,21 @@ pub struct Compilation {
 /// `fn_name` becomes the emitted function's name and must be a valid Rust
 /// identifier.  All randomness comes from `rng`; the caller seeds it however
 /// they like.
+/// Re-concretize an existing circuit with fresh randomness — a cheap rotation.
+///
+/// The circuit structure (and therefore [`Compilation::rotation_tag`]) is
+/// unchanged; only the mask seed advances, so the emitted `POOL` constants
+/// differ from the previous rotation.  Use this to rotate the browser's Wasm
+/// bundle frequently without redeploying the server verifier.
+///
+/// Returns the new `MaskedCircuit` and emitted browser source.  The
+/// `rotation_tag` to advertise is still `compilation.rotation_tag`.
+pub fn rotate_cheap(compilation: &Compilation, fn_name: &str, rng: &mut impl RngCore) -> (MaskedCircuit, String) {
+    let masked = MaskedCircuit::from_circuit(&compilation.circuit, rng);
+    let code   = emit_rust(&masked, &compilation.circuit, fn_name, rng);
+    (masked, code)
+}
+
 pub fn compile(expr: Rc<Expr>, fn_name: &str, rng: &mut impl RngCore) -> Compilation {
     let transformed  = strong_rotate(&expr, rng);
     let circuit      = lower_to_circuit(&transformed);
@@ -153,6 +168,45 @@ mod tests {
         let expected = vals[&circuit.egress];
 
         run(Rc::clone(&expr), &[("a", av), ("b", bv), ("c", cv), ("d", dv)], expected);
+    }
+
+    #[test]
+    fn rotate_cheap_preserves_semantics() {
+        let a = Expr::input("a");
+        let b = Expr::input("b");
+        let c = Expr::secret_const(0x9e37_79b9);
+        let expr = Rc::new(Expr::rotl(Expr::xor(Expr::or(a, b), c), 5));
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let orig = compile(Rc::clone(&expr), "f", &mut rng);
+
+        let mut rng2 = rand::rngs::StdRng::seed_from_u64(99);
+        let (masked2, code2) = rotate_cheap(&orig, "f", &mut rng2);
+
+        // Code strings differ — different POOL constants.
+        assert_ne!(orig.code, code2);
+
+        // Semantics unchanged.
+        let input_map: std::collections::HashMap<String, u32> =
+            [("a", 0x1234_5678u32), ("b", 0xDEAD_BEEFu32)]
+            .iter().map(|&(k, v)| (k.to_string(), v)).collect();
+        let (_regs, result) = masked2.eval(&orig.circuit, &input_map);
+        let expected = ((0x1234_5678u32 | 0xDEAD_BEEFu32) ^ 0x9e37_79b9u32).rotate_left(5);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn rotate_cheap_embeds_same_rotation_tag() {
+        let expr = Rc::new(Expr::xor(Expr::input("a"), Expr::input("b")));
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let orig = compile(Rc::clone(&expr), "f", &mut rng);
+
+        let mut rng2 = rand::rngs::StdRng::seed_from_u64(1);
+        let (_masked, code) = rotate_cheap(&orig, "f", &mut rng2);
+
+        let tag_hex = format!("0x{:08x}", orig.rotation_tag);
+        assert!(code.contains(&tag_hex),
+            "cheap rotation must embed the same ROTATION_TAG {tag_hex}");
     }
 
     #[test]

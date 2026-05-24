@@ -20,5 +20,6 @@ pub mod fixture_defs;
 pub mod lower;
 pub mod mask;
 pub mod pipeline;
+pub mod prelude;
 pub mod expr;
 pub mod expr_transform;
