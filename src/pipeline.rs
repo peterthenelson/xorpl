@@ -40,16 +40,8 @@ pub struct Compilation {
     pub circuit: Circuit,
     /// Concretized client artifact — baked masks, constants, and triples.
     pub masked: MaskedCircuit,
-}
-
-impl Compilation {
-    /// Emit the concretized Rust function named `fn_name`.
-    ///
-    /// `rng` seeds the register-slot shuffle; the caller can use the same RNG
-    /// that was passed to `compile` (continuing the sequence) or a fresh one.
-    pub fn emit(&self, fn_name: &str, rng: &mut impl RngCore) -> String {
-        emit_rust(&self.masked, &self.circuit, fn_name, rng)
-    }
+    /// Emitted Rust source — the deployable client function.
+    pub code: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,15 +55,18 @@ impl Compilation {
 /// 2. `lower_to_circuit` — deterministic lowering to a value graph.
 /// 3. `inject_remasks` at rate 1-in-4 — post-lowering mask re-randomization.
 /// 4. `MaskedCircuit::from_circuit` — concretization.
+/// 5. `emit_rust` — code generation into `Compilation::code`.
 ///
-/// All randomness comes from `rng`; the caller seeds it however they like.
-/// Holding `rng` state fixed reproduces identical output for the same `expr`.
-pub fn compile(expr: Rc<Expr>, rng: &mut impl RngCore) -> Compilation {
+/// `fn_name` becomes the emitted function's name and must be a valid Rust
+/// identifier.  All randomness comes from `rng`; the caller seeds it however
+/// they like.
+pub fn compile(expr: Rc<Expr>, fn_name: &str, rng: &mut impl RngCore) -> Compilation {
     let transformed = strong_rotate(&expr, rng);
     let circuit     = lower_to_circuit(&transformed);
     let circuit     = inject_remasks(&circuit, rng, 4);
     let masked      = MaskedCircuit::from_circuit(&circuit, rng);
-    Compilation { original_expr: expr, circuit, masked }
+    let code        = emit_rust(&masked, &circuit, fn_name, rng);
+    Compilation { original_expr: expr, circuit, masked, code }
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +84,7 @@ mod tests {
 
         for pipeline_seed in 0u64..4 {
             let mut rng = rand::rngs::StdRng::seed_from_u64(pipeline_seed);
-            let c = compile(Rc::clone(&expr), &mut rng);
+            let c = compile(Rc::clone(&expr), "checksum", &mut rng);
 
             let vals = c.circuit.eval(&input_map);
             assert_eq!(vals[&c.circuit.egress], expected,
@@ -99,8 +94,7 @@ mod tests {
             assert_eq!(revealed, expected,
                 "masked eval wrong (pipeline_seed={pipeline_seed})");
 
-            let src = c.emit("checksum", &mut rng);
-            assert!(!src.is_empty());
+            assert!(!c.code.is_empty());
         }
     }
 
