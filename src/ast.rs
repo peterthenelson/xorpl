@@ -663,8 +663,12 @@ fn try_identities(result: Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> {
 /// Use a different `structure_seed` for strong rotation (new circuit shape)
 /// or the same `structure_seed` with a different `mask_seed` for cheap
 /// rotation (same shape, fresh baked constants).
-pub fn strong_rotate(_expr: &Rc<Expr>, _rng: &mut impl rand::RngCore) -> Rc<Expr> {
-    todo!()
+pub fn strong_rotate(expr: &Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> {
+    let e = constant_fold(expr);
+    let e = reassociate(&e, rng);
+    let e = inject_decoys(&e, rng);
+    let e = apply_identities(&e, rng);
+    constant_fold(&e)
 }
 
 // ---------------------------------------------------------------------------
@@ -953,5 +957,37 @@ mod tests {
             depths.insert(lower_to_circuit(&r).gadgets.len());
         }
         assert!(depths.len() > 1, "expected structural variation across seeds");
+    }
+
+    // --- strong_rotate tests ---
+
+    #[test]
+    fn strong_rotate_preserves_semantics() {
+        let inputs = &[("a", 0xDEAD_BEEF_u32), ("b", 0xCAFE_BABE_u32)];
+        let expr = Expr::or(
+            Expr::xor(Expr::input("a"), Expr::input("b")),
+            Expr::and(Expr::input("a"), Expr::input("b")),
+        );
+        let expected = eval(&expr, inputs);
+        for seed in 0u64..20 {
+            let r = strong_rotate(&expr, &mut seeded_rng(seed));
+            assert_eq!(eval(&r, inputs), expected, "semantics changed at seed {seed}");
+        }
+    }
+
+    #[test]
+    fn strong_rotate_varies_circuit_shape() {
+        let expr = Expr::or(
+            Expr::xor(Expr::input("a"), Expr::input("b")),
+            Expr::and(Expr::input("a"), Expr::input("b")),
+        );
+        let base_size = lower_to_circuit(&expr).gadgets.len();
+        let mut sizes: std::collections::HashSet<usize> = Default::default();
+        for seed in 0u64..30 {
+            let r = strong_rotate(&expr, &mut seeded_rng(seed));
+            sizes.insert(lower_to_circuit(&r).gadgets.len());
+        }
+        // Decoys and identity rewrites should produce at least two distinct sizes.
+        assert!(sizes.len() > 1, "all rotations produced same circuit size {base_size}");
     }
 }
