@@ -548,8 +548,93 @@ fn decoy_node(
 /// Run `constant_fold` after `apply_identities` to collapse any
 /// `Not(PublicConst(k))` or `Xor(x, PublicConst(0))` nodes that the
 /// identity rewrites may have introduced.
-pub fn apply_identities(_expr: &Rc<Expr>, _rng: &mut impl rand::RngCore) -> Rc<Expr> {
-    todo!()
+pub fn apply_identities(expr: &Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> {
+    let mut memo = std::collections::HashMap::new();
+    apply_ident_node(expr, rng, &mut memo)
+}
+
+fn apply_ident_node(
+    expr: &Rc<Expr>,
+    rng:  &mut impl rand::RngCore,
+    memo: &mut std::collections::HashMap<*const Expr, Rc<Expr>>,
+) -> Rc<Expr> {
+    let ptr = Rc::as_ptr(expr);
+    if let Some(cached) = memo.get(&ptr) {
+        return cached.clone();
+    }
+
+    // Bottom-up: transform children first.
+    let result = match expr.as_ref() {
+        Expr::Input(_) | Expr::PublicConst(_) | Expr::SecretConst(_) => expr.clone(),
+        Expr::Not(a) => Expr::not(apply_ident_node(a, rng, memo)),
+        Expr::Xor(a, b) => Expr::xor(
+            apply_ident_node(a, rng, memo),
+            apply_ident_node(b, rng, memo),
+        ),
+        Expr::And(a, b) => Expr::and(
+            apply_ident_node(a, rng, memo),
+            apply_ident_node(b, rng, memo),
+        ),
+        Expr::Or(a, b) => Expr::or(
+            apply_ident_node(a, rng, memo),
+            apply_ident_node(b, rng, memo),
+        ),
+        Expr::Add(a, b) => Expr::add(
+            apply_ident_node(a, rng, memo),
+            apply_ident_node(b, rng, memo),
+        ),
+        Expr::Rotl(a, r) => Expr::rotl(apply_ident_node(a, rng, memo), *r),
+        Expr::Mux { cond, on_true, on_false } => Expr::mux(
+            apply_ident_node(cond, rng, memo),
+            apply_ident_node(on_true, rng, memo),
+            apply_ident_node(on_false, rng, memo),
+        ),
+    };
+
+    // Apply identities to `result` in order, each with ~30% probability.
+    // Each fires independently so multiple can stack.
+    let result = try_identities(result, rng);
+
+    memo.insert(ptr, result.clone());
+    result
+}
+
+// Probability threshold: rng.next_u32() % 10 < 3 ≈ 30%.
+fn try_identities(result: Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> {
+    // Not(Not(x)) → x
+    let result = if let Expr::Not(inner) = result.as_ref() {
+        if let Expr::Not(x) = inner.as_ref() {
+            if rng.next_u32() % 10 < 3 { x.clone() } else { result }
+        } else { result }
+    } else { result };
+
+    // Or(a,b) → Not(And(Not(a), Not(b)))
+    let result = if let Expr::Or(a, b) = result.as_ref() {
+        if rng.next_u32() % 10 < 3 {
+            Expr::not(Expr::and(Expr::not(a.clone()), Expr::not(b.clone())))
+        } else { result }
+    } else { result };
+
+    // And(a,b) → Not(Or(Not(a), Not(b)))
+    let result = if let Expr::And(a, b) = result.as_ref() {
+        if rng.next_u32() % 10 < 3 {
+            Expr::not(Expr::or(Expr::not(a.clone()), Expr::not(b.clone())))
+        } else { result }
+    } else { result };
+
+    // Xor(a,b) → Not(Xor(Not(a), b))
+    let result = if let Expr::Xor(a, b) = result.as_ref() {
+        if rng.next_u32() % 10 < 3 {
+            Expr::not(Expr::xor(Expr::not(a.clone()), b.clone()))
+        } else { result }
+    } else { result };
+
+    // x → Not(Not(x))  (double-NOT introduction)
+    if rng.next_u32() % 10 < 3 {
+        Expr::not(Expr::not(result))
+    } else {
+        result
+    }
 }
 
 /// Apply all structural transforms in sequence to produce a semantically
@@ -828,5 +913,45 @@ mod tests {
             if n > base { saw_more = true; break; }
         }
         assert!(saw_more, "expected at least one decoy AND pair to appear across 50 runs");
+    }
+
+    // --- apply_identities tests ---
+
+    #[test]
+    fn apply_identities_preserves_semantics_bitwise() {
+        let inputs = &[("a", 0xDEAD_BEEF_u32), ("b", 0xCAFE_BABE_u32)];
+        let expr = Expr::or(
+            Expr::xor(Expr::input("a"), Expr::input("b")),
+            Expr::and(Expr::input("a"), Expr::input("b")),
+        );
+        let expected = eval(&expr, inputs);
+        for seed in 0u64..20 {
+            let r = apply_identities(&expr, &mut seeded_rng(seed));
+            assert_eq!(eval(&r, inputs), expected, "semantics changed at seed {seed}");
+        }
+    }
+
+    #[test]
+    fn apply_identities_preserves_semantics_not() {
+        let inputs = &[("a", 0x1234_5678_u32)];
+        let expr = Expr::not(Expr::not(Expr::input("a")));
+        let expected = eval(&expr, inputs);
+        for seed in 0u64..10 {
+            let r = apply_identities(&expr, &mut seeded_rng(seed));
+            assert_eq!(eval(&r, inputs), expected, "semantics changed at seed {seed}");
+        }
+    }
+
+    #[test]
+    fn apply_identities_varies_structure() {
+        let expr = Expr::or(Expr::input("a"), Expr::input("b"));
+        let mut depths: std::collections::HashSet<usize> = Default::default();
+        let mut rng = seeded_rng(7);
+        for _ in 0..40 {
+            let r = apply_identities(&expr, &mut rng);
+            // Use gadget count as structural proxy (De Morgan changes depth)
+            depths.insert(lower_to_circuit(&r).gadgets.len());
+        }
+        assert!(depths.len() > 1, "expected structural variation across seeds");
     }
 }
