@@ -84,6 +84,65 @@ mod mux_demo {
     }
 }
 
+// Reference implementation of the ChaCha quarter-round checksum used by both
+// `chacha_qr` and `chacha_qr_rotated` correctness tests.
+fn chacha_qr_expected(a: u32, b: u32, c: u32, d: u32) -> u32 {
+    let a1 = a.wrapping_add(b);
+    let d2 = (d ^ a1).rotate_left(16);
+    let c1 = c.wrapping_add(d2);
+    let b2 = (b ^ c1).rotate_left(12);
+    let a2 = a1.wrapping_add(b2);
+    let d4 = (d2 ^ a2).rotate_left(8);
+    let c2 = c1.wrapping_add(d4);
+    let b4 = (b2 ^ c2).rotate_left(7);
+    a2 ^ b4 ^ c2 ^ d4
+}
+
+mod chacha_qr {
+    use super::chacha_qr_expected as expected;
+    include!("fixtures/chacha_qr.rs");
+
+    #[test]
+    fn gives_right_answer() {
+        let cases: &[(u32, u32, u32, u32)] = &[
+            (0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000),
+            (0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF),
+            // ChaCha "expand 32-byte k" sigma words
+            (0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574),
+            (0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321),
+        ];
+        for &(a, b, c, d) in cases {
+            assert_eq!(
+                chacha_qr(a, b, c, d),
+                expected(a, b, c, d),
+                "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})"
+            );
+        }
+    }
+}
+
+mod chacha_qr_rotated {
+    use super::chacha_qr_expected as expected;
+    include!("fixtures/chacha_qr_rotated.rs");
+
+    #[test]
+    fn gives_right_answer() {
+        let cases: &[(u32, u32, u32, u32)] = &[
+            (0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000),
+            (0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF),
+            (0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574),
+            (0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321),
+        ];
+        for &(a, b, c, d) in cases {
+            assert_eq!(
+                chacha_qr_rotated(a, b, c, d),
+                expected(a, b, c, d),
+                "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Skew check (automatic — driven by ALL_FIXTURES)
 // ---------------------------------------------------------------------------
@@ -91,7 +150,7 @@ mod mux_demo {
 #[test]
 fn fixtures_not_out_of_sync() {
     for def in ALL_FIXTURES {
-        let circuit = lower_to_circuit(&(def.build)());
+        let circuit = lower_to_circuit(&def.expr());
         let vm = ConcreteVm::from_circuit(&circuit, def.seed);
         let emitted = emit_rust(&vm, def.name);
 
@@ -115,7 +174,7 @@ fn fixtures_not_out_of_sync() {
 #[test]
 fn structural_properties() {
     for def in ALL_FIXTURES {
-        let circuit = lower_to_circuit(&(def.build)());
+        let circuit = lower_to_circuit(&def.expr());
         let vm = ConcreteVm::from_circuit(&circuit, def.seed);
         let emitted = emit_rust(&vm, def.name);
 

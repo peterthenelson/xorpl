@@ -29,8 +29,28 @@ pub struct FixtureDef {
     /// Fixed PRNG seed for concretization.  Changing the seed rotates constants
     /// without changing the circuit shape (a "cheap rotation").
     pub seed: u64,
+    /// If `Some`, the base expression is passed through `strong_rotate` with
+    /// this seed before lowering.  Use distinct values per rotated fixture to
+    /// get distinct circuit shapes.
+    pub structure_seed: Option<u64>,
     /// Builds the expression tree for this circuit.
     pub build: fn() -> Rc<Expr>,
+}
+
+impl FixtureDef {
+    /// Return the expression to lower, applying `strong_rotate` when
+    /// `structure_seed` is set.  Both `regen_fixtures` and the skew check call
+    /// this so they always agree on what to emit.
+    pub fn expr(&self) -> Rc<Expr> {
+        let base = (self.build)();
+        if let Some(ss) = self.structure_seed {
+            use rand::SeedableRng;
+            let mut rng = rand::rngs::StdRng::seed_from_u64(ss);
+            crate::ast::strong_rotate(&base, &mut rng)
+        } else {
+            base
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -42,9 +62,11 @@ pub struct FixtureDef {
 /// Add entries here to extend the skew check, structural tests, and the
 /// regen binary.  See the module-level doc for the full checklist.
 pub static ALL_FIXTURES: &[FixtureDef] = &[
-    FixtureDef { name: "or_rotl_demo", seed: 0, build: build_or_rotl_demo },
-    FixtureDef { name: "add32_demo",   seed: 0, build: build_add32_demo   },
-    FixtureDef { name: "mux_demo",     seed: 0, build: build_mux_demo     },
+    FixtureDef { name: "or_rotl_demo",      seed: 0, structure_seed: None,     build: build_or_rotl_demo  },
+    FixtureDef { name: "add32_demo",         seed: 0, structure_seed: None,     build: build_add32_demo    },
+    FixtureDef { name: "mux_demo",           seed: 0, structure_seed: None,     build: build_mux_demo      },
+    FixtureDef { name: "chacha_qr",          seed: 0, structure_seed: None,     build: build_chacha_qr     },
+    FixtureDef { name: "chacha_qr_rotated",  seed: 0, structure_seed: Some(42), build: build_chacha_qr     },
     // Add new fixtures here ↑
 ];
 
@@ -76,4 +98,38 @@ fn build_add32_demo() -> Rc<Expr> {
 /// selection.  Exercises the Mux expansion (1 triple).
 fn build_mux_demo() -> Rc<Expr> {
     Expr::mux(Expr::input("cond"), Expr::input("t"), Expr::input("f"))
+}
+
+/// F(a,b,c,d) = ChaCha quarter-round folded to one word.
+///
+/// Implements one ChaCha quarter-round in SSA form and XORs the four
+/// output words into a single 32-bit checksum:
+///
+/// ```text
+/// a += b; d ^= a; d <<<= 16;
+/// c += d; b ^= c; b <<<= 12;
+/// a += b; d ^= a; d <<<= 8;
+/// c += d; b ^= c; b <<<= 7;
+/// output = a ^ b ^ c ^ d
+/// ```
+///
+/// Exercises all ARX primitives (Add, Xor, Rotl) and four rounds of the
+/// carry chain.  The rotated variant (`chacha_qr_rotated`) applies
+/// `strong_rotate` on top, producing a structurally different image.
+fn build_chacha_qr() -> Rc<Expr> {
+    let a = Expr::input("a");
+    let b = Expr::input("b");
+    let c = Expr::input("c");
+    let d = Expr::input("d");
+
+    let a1 = Expr::add(a,         b.clone());
+    let d2 = Expr::rotl(Expr::xor(d,         a1.clone()), 16);
+    let c1 = Expr::add(c,         d2.clone());
+    let b2 = Expr::rotl(Expr::xor(b,         c1.clone()), 12);
+    let a2 = Expr::add(a1,        b2.clone());
+    let d4 = Expr::rotl(Expr::xor(d2,        a2.clone()),  8);
+    let c2 = Expr::add(c1,        d4.clone());
+    let b4 = Expr::rotl(Expr::xor(b2,        c2.clone()),  7);
+
+    Expr::xor(Expr::xor(a2, b4), Expr::xor(c2, d4))
 }

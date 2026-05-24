@@ -24,7 +24,7 @@ use xorpl::{
 fn main() {
     let mut wrote = 0usize;
     for def in ALL_FIXTURES {
-        let circuit = lower_to_circuit(&(def.build)());
+        let circuit = lower_to_circuit(&def.expr());
         let vm = ConcreteVm::from_circuit(&circuit, def.seed);
         let source = emit_rust(&vm, def.name);
 
