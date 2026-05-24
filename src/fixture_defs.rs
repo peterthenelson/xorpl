@@ -67,6 +67,7 @@ pub static ALL_FIXTURES: &[FixtureDef] = &[
     FixtureDef { name: "mux_demo",           seed: 0, structure_seed: None,     build: build_mux_demo      },
     FixtureDef { name: "chacha_qr",          seed: 0, structure_seed: None,     build: build_chacha_qr     },
     FixtureDef { name: "chacha_qr_rotated",  seed: 0, structure_seed: Some(42), build: build_chacha_qr     },
+    FixtureDef { name: "or_rotl_mux_decoy", seed: 0, structure_seed: None,     build: build_or_rotl_mux_decoy },
     // Add new fixtures here ↑
 ];
 
@@ -116,6 +117,19 @@ fn build_mux_demo() -> Rc<Expr> {
 /// Exercises all ARX primitives (Add, Xor, Rotl) and four rounds of the
 /// carry chain.  The rotated variant (`chacha_qr_rotated`) applies
 /// `strong_rotate` on top, producing a structurally different image.
+/// F(a, b) = or_rotl_demo(a, b), but wrapped in one explicit MUX decoy.
+///
+/// `Mux(secret_const(0xFFFF_FFFF), base, And(a, b))` always evaluates to
+/// `base`; `And(a, b)` is the dead on_false branch that looks live from the
+/// dataflow graph.  The condition is masked in the pool so it appears as a
+/// random u32.
+fn build_or_rotl_mux_decoy() -> Rc<Expr> {
+    let a = Expr::input("a");
+    let b = Expr::input("b");
+    let base = build_or_rotl_demo();
+    Expr::mux(Expr::secret_const(0xFFFF_FFFF), base, Expr::and(a, b))
+}
+
 fn build_chacha_qr() -> Rc<Expr> {
     let a = Expr::input("a");
     let b = Expr::input("b");

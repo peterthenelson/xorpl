@@ -405,23 +405,34 @@ fn fold_chain(mut operands: Vec<Rc<Expr>>, is_and: bool) -> Rc<Expr> {
 /// Splice dead sub-expressions into the tree to pad the circuit with
 /// AND-consuming noise an attacker cannot easily filter out.
 ///
-/// # Decoy form
+/// # Decoy styles
 ///
-/// The canonical decoy is `Xor(e, Xor(And(p, q), And(p, q)))` which equals
-/// `e ^ 0 = e` but adds two AND triples to the image.  `p` and `q` are
-/// drawn from *existing* wires in the expression (collected by a pre-pass)
-/// so the decoy operands are indistinguishable from real operands.
+/// Two styles are chosen at random (~50/50) each time a decoy fires:
+///
+/// **Style A — XOR-zero**: `Xor(e, Xor(And(p,q), And(p,q)))` = `e ^ 0 = e`.
+/// Adds two AND triples; the identity is algebraically recognisable only if
+/// the observer notices both AND inputs are pointer-identical.
+///
+/// **Style B — MUX dead branch**: `Mux(secret_const(K), e, And(p,q))` where
+/// `K` is `0xFFFF_FFFF` (always picks `on_true`) or `0` (always picks
+/// `on_false`, with `e` placed there instead).  The `secret_const` condition
+/// is masked in the pool so it looks like a random 32-bit value; from the
+/// dataflow graph `And(p,q)` appears to be a live operand that could influence
+/// the output, but is always discarded at runtime.
+///
+/// In both cases `p` and `q` are drawn from the pre-collected pool of
+/// non-constant nodes so the decoy operands are indistinguishable from real
+/// ones.
 ///
 /// # Algorithm
 ///
 /// 1. Pre-pass: collect a pool of candidate wire `Rc<Expr>` nodes (any node
 ///    that is not a constant).
-/// 2. For each node in the tree (bottom-up, memo'd), with probability
-///    `decoy_prob` splice in one decoy: choose `p` and `q` at random from
-///    the candidate pool, construct `Xor(node, Xor(And(p,q), And(p,q)))`,
-///    return that as the replacement.
-/// 3. `decoy_prob` defaults to something like 0.15 so a typical circuit
-///    grows by ~15–20% in AND-gate count.
+/// 2. For each node in the tree (bottom-up, memo'd), with probability ~1/7
+///    splice in one decoy chosen randomly from the two styles above.
+/// 3. `constant_fold` run after this pass will *not* collapse Style B decoys
+///    because `secret_const` conditions are not folded (only `public_const`
+///    conditions are).
 ///
 /// # Interaction with other passes
 ///
@@ -506,16 +517,33 @@ fn decoy_node(
         ),
     };
 
-    // ~1/7 ≈ 14% chance: wrap result in Xor(result, Xor(And(p,q), And(p,q))) == result ^ 0.
-    let result = if rng.next_u32() % 7 == 0 {
+    // ~1/7 ≈ 14% chance: inject a decoy. Style chosen at random from two options.
+    let r = rng.next_u32();
+    let result = if r % 7 == 0 {
+        let style = rng.next_u32();
         let i = (rng.next_u32() as usize) % pool.len();
         let j = (rng.next_u32() as usize) % pool.len();
         let p = pool[i].clone();
         let q = pool[j].clone();
-        // Two separate Rc allocations → two separate AND gadgets in the circuit.
-        let and1 = Expr::and(p.clone(), q.clone());
-        let and2 = Expr::and(p, q);
-        Expr::xor(result, Expr::xor(and1, and2))
+
+        if style % 2 == 0 {
+            // Style A: XOR-zero. result ^ (and(p,q) ^ and(p,q)) = result ^ 0 = result.
+            // Two separate Rc allocations → two separate AND gadgets in the circuit.
+            let and1 = Expr::and(p.clone(), q.clone());
+            let and2 = Expr::and(p, q);
+            Expr::xor(result, Expr::xor(and1, and2))
+        } else {
+            // Style B: MUX with dead branch.  The secret_const condition is masked in
+            // the pool (looks like a random u32); `garbage` is dead but looks live.
+            let garbage = Expr::and(p, q);
+            if style % 4 == 1 {
+                // cond = all-ones → always selects on_true = result.
+                Expr::mux(Expr::secret_const(0xFFFF_FFFF), result, garbage)
+            } else {
+                // cond = all-zeros → always selects on_false = result.
+                Expr::mux(Expr::secret_const(0), garbage, result)
+            }
+        }
     } else {
         result
     };

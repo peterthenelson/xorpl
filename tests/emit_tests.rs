@@ -84,6 +84,24 @@ mod mux_demo {
     }
 }
 
+mod or_rotl_mux_decoy {
+    include!("fixtures/or_rotl_mux_decoy.rs");
+
+    #[test]
+    fn gives_right_answer() {
+        let cases: &[(u32, u32)] = &[
+            (0x0000_0000, 0x0000_0000),
+            (0xFFFF_FFFF, 0xFFFF_FFFF),
+            (0x1234_5678, 0xDEAD_BEEF),
+            (0xAAAA_AAAA, 0x5555_5555),
+        ];
+        for &(a, b) in cases {
+            let expected = ((a | b) ^ 0x9e37_79b9u32).rotate_left(5);
+            assert_eq!(or_rotl_mux_decoy(a, b), expected, "inputs ({a:#010x}, {b:#010x})");
+        }
+    }
+}
+
 // Reference implementation of the ChaCha quarter-round checksum used by both
 // `chacha_qr` and `chacha_qr_rotated` correctness tests.
 fn chacha_qr_expected(a: u32, b: u32, c: u32, d: u32) -> u32 {
