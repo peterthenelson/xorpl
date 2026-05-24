@@ -30,18 +30,10 @@ pub type GenId = usize;
 // register content at runtime is always value ^ mask. The mask is NOT stored
 // on the wire — it lives in a side map, keeping the value graph salt-free.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WireRole {
+pub enum Wire {
     Ingest,
     Egress,
     Internal,
-}
-
-#[derive(Clone, Debug)]
-pub struct Wire {
-    id: WireId,
-    width: u32, // bits (32 here)
-    producer: usize,
-    role: WireRole,
 }
 
 // ---------- gadgets ----------
@@ -100,8 +92,7 @@ impl Gadget {
 
 #[derive(Clone, Debug)]
 pub struct Generator {
-    id: GenId,
-    width: u32,
+    // GenId is the generator's index in Circuit.generators — not stored redundantly here.
     purpose: &'static str, // for the registry / debugging
 }
 
@@ -191,10 +182,10 @@ impl ConcreteVm {
     pub fn from_circuit(c: &Circuit, seed: u64) -> ConcreteVm {
         let mut rng = StdRng::seed_from_u64(seed);
 
-        // (4) sample every independent generator
+        // (4) sample every independent generator; GenId == index in c.generators
         let mut gen_values: HashMap<GenId, u32> = HashMap::new();
-        for g in &c.generators {
-            gen_values.insert(g.id, rng.random()); // 32-bit width here
+        for (id, _) in c.generators.iter().enumerate() {
+            gen_values.insert(id, rng.random());
         }
 
         let mut masks: HashMap<WireId, u32> = HashMap::new();
@@ -355,14 +346,14 @@ const C: u32 = 0x9e37_79b9;
 
 pub fn build_example() -> Circuit {
     let wires = vec![
-        Wire { id: 0, width: 32, producer: 0, role: WireRole::Ingest },
-        Wire { id: 1, width: 32, producer: 1, role: WireRole::Ingest },
-        Wire { id: 2, width: 32, producer: 2, role: WireRole::Internal },
-        Wire { id: 3, width: 32, producer: 3, role: WireRole::Internal },
-        Wire { id: 4, width: 32, producer: 4, role: WireRole::Internal },
-        Wire { id: 5, width: 32, producer: 5, role: WireRole::Internal },
-        Wire { id: 6, width: 32, producer: 6, role: WireRole::Internal },
-        Wire { id: 7, width: 32, producer: 7, role: WireRole::Egress },
+        Wire::Ingest,    // 0: a
+        Wire::Ingest,    // 1: b
+        Wire::Internal,  // 2: C (secret const)
+        Wire::Internal,  // 3: a ^ b
+        Wire::Internal,  // 4: a & b
+        Wire::Internal,  // 5: a | b
+        Wire::Internal,  // 6: (a|b) ^ C
+        Wire::Egress,    // 7: rotl(.., 5)
     ];
     let gadgets = vec![
         Gadget::Ingest { name: "a".to_string(), gen: 0, out: 0 },
@@ -376,10 +367,10 @@ pub fn build_example() -> Circuit {
         Gadget::Egress { a: 7 },
     ];
     let generators = vec![
-        Generator { id: 0, width: 32, purpose: "ingest a" },
-        Generator { id: 1, width: 32, purpose: "ingest b" },
-        Generator { id: 2, width: 32, purpose: "secret const C" },
-        Generator { id: 3, width: 32, purpose: "AND output mask" },
+        Generator { purpose: "ingest a" },
+        Generator { purpose: "ingest b" },
+        Generator { purpose: "secret const C" },
+        Generator { purpose: "AND output mask" },
     ];
     Circuit { gadgets, wires, generators, egress: 7 }
 }
@@ -455,12 +446,12 @@ mod tests {
                 let inputs = make_inputs(a, b);
                 let values = c.eval(&inputs);
                 let (regs, _) = vm.eval(&inputs);
-                for w in &c.wires {
-                    if w.role == WireRole::Egress { continue; }
+                for (id, w) in c.wires.iter().enumerate() {
+                    if *w == Wire::Egress { continue; }
                     assert_eq!(
-                        regs[&w.id],
-                        values[&w.id] ^ vm.masks[&w.id],
-                        "wire {}: reg != value^mask (seed={:#x})", w.id, seed,
+                        regs[&id],
+                        values[&id] ^ vm.masks[&id],
+                        "wire {id}: reg != value^mask (seed={:#x})", seed,
                     );
                 }
             }
@@ -518,7 +509,8 @@ pub fn demo() {
         let gens: Vec<String> = c
             .generators
             .iter()
-            .map(|g| format!("g#{}={}", g.id, hx32(vm.gen_values[&g.id])))
+            .enumerate()
+            .map(|(id, g)| format!("g#{}={} ({})", id, hx32(vm.gen_values[&id]), g.purpose))
             .collect();
         println!("generators (the rotation key): {}", gens.join("  "));
 
