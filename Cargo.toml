@@ -3,5 +3,21 @@ name = "xorpl"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Exposes fixture_defs for the regen binary and emit integration tests.
+# Not part of the public API — do not enable in production builds.
+fixture-defs = []
+
 [dependencies]
 rand = "0.9.1"
+
+[[bin]]
+name = "demo"
+
+[[bin]]
+name = "regen_fixtures"
+required-features = ["fixture-defs"]
+
+[[test]]
+name = "emit_tests"
+required-features = ["fixture-defs"]

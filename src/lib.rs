@@ -14,6 +14,7 @@
 
 pub mod ast;
 pub mod emit;
+#[cfg(feature = "fixture-defs")]
 pub mod fixture_defs;
 pub mod lower;
 pub mod vm;

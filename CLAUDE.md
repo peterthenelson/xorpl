@@ -7,7 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build          # compile
 cargo run --bin demo # run verification harness + print a concretization dump
-cargo test           # (no unit tests yet; correctness is verified via demo)
+cargo test           # unit tests (vm, lower)
+cargo test --features fixture-defs                  # + emit integration tests
+cargo run --bin regen_fixtures --features fixture-defs  # regenerate fixture files
 ```
 
 ## What This Is
