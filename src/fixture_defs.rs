@@ -16,7 +16,7 @@
 
 use std::rc::Rc;
 
-use crate::ast::Expr;
+use crate::expr::Expr;
 
 // ---------------------------------------------------------------------------
 // Fixture descriptor
@@ -46,7 +46,7 @@ impl FixtureDef {
         if let Some(ss) = self.structure_seed {
             use rand::SeedableRng;
             let mut rng = rand::rngs::StdRng::seed_from_u64(ss);
-            crate::ast::strong_rotate(&base, &mut rng)
+            crate::expr_transform::strong_rotate(&base, &mut rng)
         } else {
             base
         }
@@ -119,13 +119,13 @@ fn build_mux_demo() -> Rc<Expr> {
 /// `strong_rotate` on top, producing a structurally different image.
 /// F(a, b) = or_rotl_demo(a, b), but wrapped in one explicit MUX decoy.
 ///
-/// Uses `ast::decoy_mux` so the dead branch is constructed the same way
-/// `inject_decoys` would; `And(a, b)` is the garbage operand.
+/// Uses `expr_transform::decoy_mux` so the dead branch is constructed the
+/// same way `inject_decoys` would; `And(a, b)` is the garbage operand.
 fn build_or_rotl_mux_decoy() -> Rc<Expr> {
     let a = Expr::input("a");
     let b = Expr::input("b");
     let base = build_or_rotl_demo();
-    crate::ast::decoy_mux(base, Expr::and(a, b))
+    crate::expr_transform::decoy_mux(base, Expr::and(a, b))
 }
 
 fn build_chacha_qr() -> Rc<Expr> {

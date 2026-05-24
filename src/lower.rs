@@ -1,6 +1,6 @@
 //! Lowering: `Expr` → `Circuit` via `Builder`.
 //!
-//! This module is the bridge between the expression tree (`ast`) and the
+//! This module is the bridge between the expression tree (`expr`) and the
 //! gadget-level circuit (`vm`). It never touches `Gadget`, `Wire`, or
 //! `ConcreteVm` directly — the `Builder` API is the only interface it uses.
 //!
@@ -39,7 +39,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::ast::Expr;
+use crate::expr::Expr;
 use crate::vm::{Builder, Circuit, WireId};
 
 // ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ fn lower_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Expr;
+    use crate::expr::Expr;
     use crate::vm::ConcreteVm;
 
     fn str_map(inputs: &[(&str, u32)]) -> std::collections::HashMap<String, u32> {

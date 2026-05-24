@@ -1,38 +1,8 @@
-//! Expression tree (AST) for the mixing function F.
+//! Expression-tree transforms for structural rotation.
 //!
-//! This layer sits above the circuit. It lets callers write F in terms of
-//! familiar arithmetic and bitwise operations; the `lower` module then
-//! compiles it down to gadgets via `Builder`.
-//!
-//! # Sharing and DAG structure
-//!
-//! Child nodes are stored as `Rc<Expr>` rather than `Box<Expr>`. This lets a
-//! single sub-expression appear in multiple positions without cloning it.
-//! The lowering pass uses pointer identity (`Rc::as_ptr`) as a memoisation
-//! key, so each shared node is emitted as exactly one gadget. With `Box`
-//! instead, a shared sub-tree would produce duplicate output wires that
-//! `Circuit::validate()` would correctly reject.
-//!
-//! # Supported operations
-//!
-//! | Variant | Notes |
-//! |---------|-------|
-//! | `Input` | Named runtime input; becomes `Gadget::Ingest` |
-//! | `PublicConst` | Compile-time constant the server also knows; mask = 0 |
-//! | `SecretConst` | Compile-time constant hidden by a fresh mask |
-//! | `Xor` | Free (mask propagates linearly) |
-//! | `And` | Metered — consumes one Beaver triple |
-//! | `Or` | Expanded to `Xor(Xor(a,b), And(a,b))` during lowering |
-//! | `Not` | Expanded to `XorConst(a, 0xffff_ffff)` |
-//! | `Add` | Expanded to `Builder::add32` (31 triples, word-level opt.) |
-//! | `Rotl` | Free |
-//! | `Mux` | Expanded to `Xor(f, And(c, Xor(t, f)))` |
-//!
-//! # Transformations
-//!
-//! Transformations operate on `Rc<Expr>` trees and return a new `Rc<Expr>`.
+//! Transforms operate on `Rc<Expr>` trees and return a new `Rc<Expr>`.
 //! They are the mechanism for "strong rotation": two concretizations with the
-//! same seed but different transformed ASTs produce images with different
+//! same seed but different transformed expressions produce images with different
 //! shapes, not just different constants.
 //!
 //! Available transforms:
@@ -45,87 +15,16 @@
 //! - `strong_rotate`    — pipeline entry point:
 //!                        `constant_fold → reassociate → inject_decoys
 //!                         → apply_identities → constant_fold`
+//!
+//! `decoy_xor_zero` and `decoy_mux` are also exposed as standalone public
+//! helpers for deterministic decoy construction (used directly in fixture
+//! builders).
 
 use std::rc::Rc;
+use crate::expr::Expr;
 
 // ---------------------------------------------------------------------------
-// Expression tree
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug)]
-pub enum Expr {
-    // --- sources ---
-    /// Named runtime input. Each unique name becomes one `Gadget::Ingest`.
-    Input(String),
-    /// Compile-time constant visible to the server (mask is always 0).
-    PublicConst(u32),
-    /// Compile-time constant hidden from the image by a fresh per-rotation mask.
-    SecretConst(u32),
-
-    // --- bitwise ---
-    Xor(Rc<Expr>, Rc<Expr>),
-    And(Rc<Expr>, Rc<Expr>),
-    /// Lowered to `Xor(Xor(a,b), And(a,b))`.
-    Or(Rc<Expr>, Rc<Expr>),
-    /// Lowered to `XorConst(a, 0xffff_ffff)`.
-    Not(Rc<Expr>),
-
-    // --- arithmetic ---
-    /// 32-bit wrapping addition. Lowered to `Builder::add32` (31 triples).
-    Add(Rc<Expr>, Rc<Expr>),
-
-    // --- shifts / rotations ---
-    /// Left-rotation by a static amount. Free (mask rotates with value).
-    Rotl(Rc<Expr>, u32),
-
-    // --- control flow (if-converted) ---
-    /// Bitwise select: `cond & on_true | ~cond & on_false`.
-    /// Lowered to `Xor(on_false, And(cond, Xor(on_true, on_false)))`.
-    /// `cond` is treated as a full 32-bit mask (all-ones = true, all-zeros =
-    /// false); single-bit predicates should be broadcast before use.
-    Mux {
-        cond:     Rc<Expr>,
-        on_true:  Rc<Expr>,
-        on_false: Rc<Expr>,
-    },
-}
-
-// Convenience constructors so callers don't have to write Rc::new everywhere.
-impl Expr {
-    pub fn input(name: &str) -> Rc<Self> {
-        Rc::new(Self::Input(name.to_string()))
-    }
-    pub fn public_const(k: u32) -> Rc<Self> {
-        Rc::new(Self::PublicConst(k))
-    }
-    pub fn secret_const(k: u32) -> Rc<Self> {
-        Rc::new(Self::SecretConst(k))
-    }
-    pub fn xor(a: Rc<Self>, b: Rc<Self>) -> Rc<Self> {
-        Rc::new(Self::Xor(a, b))
-    }
-    pub fn and(a: Rc<Self>, b: Rc<Self>) -> Rc<Self> {
-        Rc::new(Self::And(a, b))
-    }
-    pub fn or(a: Rc<Self>, b: Rc<Self>) -> Rc<Self> {
-        Rc::new(Self::Or(a, b))
-    }
-    pub fn not(a: Rc<Self>) -> Rc<Self> {
-        Rc::new(Self::Not(a))
-    }
-    pub fn add(a: Rc<Self>, b: Rc<Self>) -> Rc<Self> {
-        Rc::new(Self::Add(a, b))
-    }
-    pub fn rotl(a: Rc<Self>, r: u32) -> Rc<Self> {
-        Rc::new(Self::Rotl(a, r))
-    }
-    pub fn mux(cond: Rc<Self>, on_true: Rc<Self>, on_false: Rc<Self>) -> Rc<Self> {
-        Rc::new(Self::Mux { cond, on_true, on_false })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Transformations (stubs)
+// constant_fold
 // ---------------------------------------------------------------------------
 
 /// Evaluate any sub-expression whose leaves are all constants.
@@ -282,6 +181,10 @@ fn fold_node(
     result
 }
 
+// ---------------------------------------------------------------------------
+// reassociate
+// ---------------------------------------------------------------------------
+
 /// Randomly reassociate XOR and AND trees.
 ///
 /// # Algorithm
@@ -289,23 +192,14 @@ fn fold_node(
 /// Bottom-up pass with memo.  At each `Xor` or `And` node, collect the
 /// *flat operand list* for that operator by recursively peeling off nodes of
 /// the same kind (e.g. `Xor(Xor(a, b), c)` → `[a, b, c]`).  Shuffle the
-/// list with `rng`, then fold it back into a random left- or right-skewed
-/// binary tree using `rng.gen_bool(0.5)` to pick left vs. right at each
-/// step.  All other node kinds are traversed but not restructured.
-///
-/// # Why this changes topology
-///
-/// Two calls with different RNG states produce different tree shapes, which
-/// lower to circuits with different gadget indices and pool layouts.  An
-/// attacker comparing two images sees a different sub-graph structure even
-/// though the function is identical.
+/// list with `rng`, then fold it back into a left-leaning binary tree.
+/// All other node kinds are traversed but not restructured.
 ///
 /// # Sharing
 ///
-/// Use a `HashMap<*const Expr, Rc<Expr>>` memo.  A shared node that appears
-/// in multiple chains is collected into both — the memo ensures it is only
-/// recursively transformed once, but it may appear at different positions in
-/// the two shuffled operand lists.
+/// A shared node that appears in multiple chains is collected into both — the
+/// memo ensures it is only recursively transformed once, but it may appear at
+/// different positions in the two shuffled operand lists.
 pub fn reassociate(expr: &Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> {
     let mut memo = std::collections::HashMap::new();
     reassoc_node(expr, rng, &mut memo)
@@ -404,6 +298,10 @@ fn fold_chain(mut operands: Vec<Rc<Expr>>, is_and: bool) -> Rc<Expr> {
     }
     acc
 }
+
+// ---------------------------------------------------------------------------
+// inject_decoys
+// ---------------------------------------------------------------------------
 
 /// Splice dead sub-expressions into the tree to pad the circuit with
 /// AND-consuming noise an attacker cannot easily filter out.
@@ -572,6 +470,10 @@ fn decoy_node(
     result
 }
 
+// ---------------------------------------------------------------------------
+// apply_identities
+// ---------------------------------------------------------------------------
+
 /// Randomly apply local algebraic identities at each node.
 ///
 /// # Identities (each applied with independent probability `p ≈ 0.3`)
@@ -583,13 +485,6 @@ fn decoy_node(
 /// | `Or(a, b)` | `Not(And(Not(a), Not(b)))` | same triples, different shape |
 /// | `And(a, b)` | `Not(Or(Not(a), Not(b)))` | same triples, different shape |
 /// | `Xor(a, b)` | `Not(Xor(Not(a), b))` | free |
-///
-/// # Algorithm
-///
-/// Recursive bottom-up pass with memo.  At each node, after transforming
-/// children, pick a random subset of applicable identities and apply them.
-/// Multiple identities can stack (e.g. introduce a double-NOT and then
-/// De-Morgan the inner AND), producing deeper variation.
 ///
 /// # Interaction with other passes
 ///
@@ -685,6 +580,10 @@ fn try_identities(result: Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// strong_rotate
+// ---------------------------------------------------------------------------
+
 /// Apply all structural transforms in sequence to produce a semantically
 /// equivalent but structurally varied expression.
 ///
@@ -702,15 +601,11 @@ fn try_identities(result: Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> {
 ///
 /// ```ignore
 /// let mut structure_rng = StdRng::seed_from_u64(structure_seed);
-/// let rotated  = strong_rotate(&base_ast, &mut structure_rng);
+/// let rotated  = strong_rotate(&base_expr, &mut structure_rng);
 /// let circuit  = lower_to_circuit(&rotated);
 /// let vm       = ConcreteVm::from_circuit(&circuit, mask_seed);
 /// let source   = emit_rust(&vm, "checksum");
 /// ```
-///
-/// Use a different `structure_seed` for strong rotation (new circuit shape)
-/// or the same `structure_seed` with a different `mask_seed` for cheap
-/// rotation (same shape, fresh baked constants).
 pub fn strong_rotate(expr: &Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> {
     let e = constant_fold(expr);
     let e = reassociate(&e, rng);
@@ -726,11 +621,10 @@ pub fn strong_rotate(expr: &Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expr::Expr;
     use crate::lower::lower_to_circuit;
     use crate::vm::ConcreteVm;
 
-    // Evaluate a circuit expression at specific inputs across several seeds
-    // and return all revealed values (should all agree).
     fn eval_all_seeds(expr: &Rc<Expr>, inputs: &[(&str, u32)]) -> Vec<u32> {
         let circuit = lower_to_circuit(expr);
         let input_map: std::collections::HashMap<String, u32> =
@@ -749,8 +643,6 @@ mod tests {
         vals[0]
     }
 
-    // Assert that two expressions are semantically equivalent for all given
-    // input tuples.
     fn assert_equiv(a: &Rc<Expr>, b: &Rc<Expr>, cases: &[&[(&str, u32)]]) {
         for &inputs in cases {
             let va = eval(a, inputs);
@@ -832,8 +724,6 @@ mod tests {
 
     #[test]
     fn fold_preserves_semantics() {
-        // A tree mixing constants and inputs should compute the same value
-        // before and after folding.
         let a = Expr::input("a");
         let expr = Expr::xor(
             Expr::and(a.clone(), Expr::public_const(0xFFFF_0000)),
@@ -850,7 +740,6 @@ mod tests {
 
     #[test]
     fn fold_shared_node_once() {
-        // Shared Rc node: constant_fold must not transform it twice.
         let k = Expr::xor(Expr::public_const(1), Expr::public_const(2)); // folds to 3
         let expr = Expr::xor(k.clone(), k.clone()); // 3 ^ 3 = 0
         let folded = constant_fold(&expr);
@@ -869,7 +758,6 @@ mod tests {
         let a = Expr::input("a");
         let b = Expr::input("b");
         let c = Expr::input("c");
-        // (a ^ b) ^ c
         let expr = Expr::xor(Expr::xor(a, b), c);
         let cases: &[&[(&str, u32)]] = &[
             &[("a", 0x1234_5678), ("b", 0xDEAD_BEEF), ("c", 0xCAFE_BABE)],
@@ -898,8 +786,6 @@ mod tests {
 
     #[test]
     fn reassociate_varies_structure() {
-        // A four-operand XOR chain should produce different bracket shapes
-        // across seeds (count distinct structures by circuit register count).
         let operands: Vec<_> = ["a","b","c","d"].iter().map(|n| Expr::input(n)).collect();
         let expr = Expr::xor(
             Expr::xor(operands[0].clone(), operands[1].clone()),
@@ -912,12 +798,8 @@ mod tests {
         for _ in 0..20 {
             let r = reassociate(&expr, &mut rng);
             let circuit = lower_to_circuit(&r);
-            // gadget count is a proxy for structure (different bracketing →
-            // different intermediate wires)
             results.insert(circuit.gadgets.len());
         }
-        // We just verify it stays correct; topological variation is visible
-        // in the gadget count or could be checked via circuit hashing.
         assert!(results.iter().all(|&n| n > 0));
         let expected = eval(&expr, inputs);
         for _ in 0..10 {
@@ -1001,7 +883,6 @@ mod tests {
         let mut rng = seeded_rng(7);
         for _ in 0..40 {
             let r = apply_identities(&expr, &mut rng);
-            // Use gadget count as structural proxy (De Morgan changes depth)
             depths.insert(lower_to_circuit(&r).gadgets.len());
         }
         assert!(depths.len() > 1, "expected structural variation across seeds");
@@ -1035,7 +916,6 @@ mod tests {
             let r = strong_rotate(&expr, &mut seeded_rng(seed));
             sizes.insert(lower_to_circuit(&r).gadgets.len());
         }
-        // Decoys and identity rewrites should produce at least two distinct sizes.
         assert!(sizes.len() > 1, "all rotations produced same circuit size {base_size}");
     }
 }
