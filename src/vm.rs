@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -114,7 +114,7 @@ pub struct Circuit {
 }
 
 impl Circuit {
-    fn eval(&self, inputs: &HashMap<String, u32>) -> HashMap<WireId, u32> {
+    pub(crate) fn eval(&self, inputs: &HashMap<String, u32>) -> HashMap<WireId, u32> {
         let mut v: HashMap<WireId, u32> = HashMap::new();
         for g in &self.gadgets {
             match g {
@@ -172,7 +172,7 @@ pub struct ConcreteVm {
     circuit: Circuit,
     seed: u64,
     baked: Vec<BakedGadget>,
-    masks: HashMap<WireId, u32>,    // NOT shipped — debug / sanity only
+    pub(crate) masks: HashMap<WireId, u32>, // NOT shipped — debug / sanity only
     gen_values: HashMap<GenId, u32>, // the sampled randomness (the rotation key)
 }
 
@@ -285,7 +285,7 @@ impl ConcreteVm {
     // MASKED RUN (the actual obfuscated VM). Only baked constants + inputs.
     // This is the proof that the masking closes.
     // =====================================================================
-    fn eval(
+    pub(crate) fn eval(
         &self,
         inputs: &HashMap<String, u32>,
     ) -> (HashMap<WireId, u32>, u32) {
@@ -396,69 +396,110 @@ fn inputs_of(a: u32, b: u32) -> HashMap<String, u32> {
     m
 }
 
-// =====================================================================
-// VERIFICATION HARNESS + invariant checks
-// =====================================================================
-pub fn verify() {
-    let c = build_example();
-    let mut rand = StdRng::seed_from_u64(0xdead_beef);
-    let mut trials: u64 = 0;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use rand::{Rng, SeedableRng};
+    use rand::rngs::StdRng;
 
-    for _ in 0..200 {
-        let seed = rand.random::<u64>();
-        let vm = ConcreteVm::from_circuit(&c, seed);
+    fn make_inputs(a: u32, b: u32) -> HashMap<String, u32> {
+        HashMap::from([("a".to_string(), a), ("b".to_string(), b)])
+    }
 
-        // structural invariant: each metered AND owns a distinct generator
-        // => no triple reuse.
-        let mut gens: Vec<GenId> = Vec::new();
-        for g in &c.gadgets {
-            if let Gadget::And { gen, .. } = g {
-                gens.push(*gen);
+    // Independent reference so the test doesn't share code with the circuit builder.
+    fn expected_f(a: u32, b: u32) -> u32 {
+        ((a | b) ^ 0x9e3779b9_u32).rotate_left(5)
+    }
+
+    // Structural: each AND gate owns a unique generator => triples never reused.
+    #[test]
+    fn no_triple_reuse() {
+        let c = build_example();
+        let and_gens: Vec<GenId> = c.gadgets.iter().filter_map(|g| {
+            if let Gadget::And { gen, .. } = g { Some(*gen) } else { None }
+        }).collect();
+        let unique: HashSet<GenId> = and_gens.iter().copied().collect();
+        assert_eq!(unique.len(), and_gens.len(), "AND gates share a generator");
+    }
+
+    // Egress must reveal exactly what the value graph and the independent reference compute.
+    #[test]
+    fn egress_matches_plaintext() {
+        let c = build_example();
+        let mut rng = StdRng::seed_from_u64(0xdead_beef);
+        for _ in 0..200 {
+            let seed: u64 = rng.random();
+            let vm = ConcreteVm::from_circuit(&c, seed);
+            for _ in 0..20 {
+                let (a, b) = (rng.random(), rng.random());
+                let inputs = make_inputs(a, b);
+                let values = c.eval(&inputs);
+                let (_, revealed) = vm.eval(&inputs);
+                assert_eq!(values[&c.egress], expected_f(a, b), "value graph != ref_f");
+                assert_eq!(revealed, expected_f(a, b), "egress mismatch (seed={:#x})", seed);
             }
-        }
-        let unique: HashSet<GenId> = gens.iter().copied().collect();
-        assert_eq!(unique.len(), gens.len(), "triple reuse!");
-
-        for _ in 0..20 {
-            let a = rand.random::<u32>();
-            let b = rand.random::<u32>();
-            let inputs = inputs_of(a, b);
-
-            let values = c.eval(&inputs);
-            let (regs, revealed) = vm.eval(&inputs);
-
-            // (1) end-to-end: egress reveals exactly the plaintext F
-            assert_eq!(revealed, ref_f(a, b), "egress mismatch (seed={})", seed);
-            // and the value-graph mirror agrees with refF
-            assert_eq!(values[&c.egress], ref_f(a, b), "value graph != refF");
-
-            // (2) lowering invariant: every register holds value ^ mask
-            for w in &c.wires {
-                if w.role == WireRole::Egress {
-                    continue;
-                }
-                let reg = regs[&w.id];
-                let expect = values[&w.id] ^ vm.masks[&w.id];
-                assert_eq!(reg, expect, "reg != value^mask at wire {}", w.id);
-            }
-
-            // (3) obscuration: the freshly-ingested inputs are NOT raw in regs
-            assert!(
-                !(regs[&0usize] == a && vm.masks[&0usize] != 0),
-                "input a appeared raw"
-            );
-            assert!(
-                !(regs[&1usize] == b && vm.masks[&1usize] != 0),
-                "input b appeared raw"
-            );
-
-            trials += 1;
         }
     }
-    println!(
-        "PASS: {} masked runs across 200 rotations all match plaintext F.\n",
-        trials
-    );
+
+    // Every non-egress register must hold value ^ mask.
+    #[test]
+    fn registers_hold_value_xor_mask() {
+        let c = build_example();
+        let mut rng = StdRng::seed_from_u64(0xdead_beef);
+        for _ in 0..200 {
+            let seed: u64 = rng.random();
+            let vm = ConcreteVm::from_circuit(&c, seed);
+            for _ in 0..20 {
+                let (a, b) = (rng.random(), rng.random());
+                let inputs = make_inputs(a, b);
+                let values = c.eval(&inputs);
+                let (regs, _) = vm.eval(&inputs);
+                for w in &c.wires {
+                    if w.role == WireRole::Egress { continue; }
+                    assert_eq!(
+                        regs[&w.id],
+                        values[&w.id] ^ vm.masks[&w.id],
+                        "wire {}: reg != value^mask (seed={:#x})", w.id, seed,
+                    );
+                }
+            }
+        }
+    }
+
+    // Every ingest wire must have a nonzero mask (non-degeneracy), and its
+    // register must never equal the raw input value.
+    #[test]
+    fn ingest_wires_are_masked() {
+        let c = build_example();
+        let mut rng = StdRng::seed_from_u64(0xdead_beef);
+        for _ in 0..200 {
+            let seed: u64 = rng.random();
+            let vm = ConcreteVm::from_circuit(&c, seed);
+            // Masks are fixed per seed; check non-degeneracy before evaluating inputs.
+            for g in &c.gadgets {
+                if let Gadget::Ingest { name, out, .. } = g {
+                    assert_ne!(
+                        vm.masks[out], 0,
+                        "ingest mask for '{}' is zero (seed={:#x})", name, seed,
+                    );
+                }
+            }
+            for _ in 0..20 {
+                let (a, b) = (rng.random(), rng.random());
+                let inputs = make_inputs(a, b);
+                let (regs, _) = vm.eval(&inputs);
+                for g in &c.gadgets {
+                    if let Gadget::Ingest { name, out, .. } = g {
+                        assert_ne!(
+                            regs[out], inputs[name],
+                            "input '{}' appeared raw (seed={:#x})", name, seed,
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // =====================================================================

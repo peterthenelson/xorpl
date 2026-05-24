@@ -1,6 +1,5 @@
-use xorpl::vm::{demo, verify};
+use xorpl::vm::demo;
 
 fn main() {
-    verify();
     demo();
 }
