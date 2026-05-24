@@ -428,8 +428,100 @@ fn fold_chain(mut operands: Vec<Rc<Expr>>, is_and: bool) -> Rc<Expr> {
 /// Run `inject_decoys` *after* `reassociate` so decoy wires blend into the
 /// already-shuffled structure, and run `constant_fold` *after* to eliminate
 /// any trivial constant expressions the decoys might have introduced.
-pub fn inject_decoys(_expr: &Rc<Expr>, _rng: &mut impl rand::RngCore) -> Rc<Expr> {
-    todo!()
+pub fn inject_decoys(expr: &Rc<Expr>, rng: &mut impl rand::RngCore) -> Rc<Expr> {
+    let mut pool: Vec<Rc<Expr>> = Vec::new();
+    let mut seen: std::collections::HashSet<*const Expr> = Default::default();
+    collect_candidates(expr, &mut pool, &mut seen);
+    if pool.len() < 2 {
+        return expr.clone();
+    }
+    let mut memo = std::collections::HashMap::new();
+    decoy_node(expr, rng, &pool, &mut memo)
+}
+
+fn collect_candidates(
+    expr: &Rc<Expr>,
+    pool: &mut Vec<Rc<Expr>>,
+    seen: &mut std::collections::HashSet<*const Expr>,
+) {
+    let ptr = Rc::as_ptr(expr) as *const Expr;
+    if !seen.insert(ptr) { return; }
+    match expr.as_ref() {
+        Expr::PublicConst(_) | Expr::SecretConst(_) => {}
+        _ => {
+            pool.push(expr.clone());
+            match expr.as_ref() {
+                Expr::Input(_) => {}
+                Expr::Xor(a, b) | Expr::And(a, b) | Expr::Or(a, b) | Expr::Add(a, b) => {
+                    collect_candidates(a, pool, seen);
+                    collect_candidates(b, pool, seen);
+                }
+                Expr::Not(a) | Expr::Rotl(a, _) => collect_candidates(a, pool, seen),
+                Expr::Mux { cond, on_true, on_false } => {
+                    collect_candidates(cond, pool, seen);
+                    collect_candidates(on_true, pool, seen);
+                    collect_candidates(on_false, pool, seen);
+                }
+                Expr::PublicConst(_) | Expr::SecretConst(_) => unreachable!(),
+            }
+        }
+    }
+}
+
+fn decoy_node(
+    expr: &Rc<Expr>,
+    rng:  &mut impl rand::RngCore,
+    pool: &[Rc<Expr>],
+    memo: &mut std::collections::HashMap<*const Expr, Rc<Expr>>,
+) -> Rc<Expr> {
+    let ptr = Rc::as_ptr(expr);
+    if let Some(cached) = memo.get(&ptr) {
+        return cached.clone();
+    }
+
+    let result = match expr.as_ref() {
+        Expr::Input(_) | Expr::PublicConst(_) | Expr::SecretConst(_) => expr.clone(),
+        Expr::Xor(a, b) => Expr::xor(
+            decoy_node(a, rng, pool, memo),
+            decoy_node(b, rng, pool, memo),
+        ),
+        Expr::And(a, b) => Expr::and(
+            decoy_node(a, rng, pool, memo),
+            decoy_node(b, rng, pool, memo),
+        ),
+        Expr::Or(a, b) => Expr::or(
+            decoy_node(a, rng, pool, memo),
+            decoy_node(b, rng, pool, memo),
+        ),
+        Expr::Not(a) => Expr::not(decoy_node(a, rng, pool, memo)),
+        Expr::Add(a, b) => Expr::add(
+            decoy_node(a, rng, pool, memo),
+            decoy_node(b, rng, pool, memo),
+        ),
+        Expr::Rotl(a, r) => Expr::rotl(decoy_node(a, rng, pool, memo), *r),
+        Expr::Mux { cond, on_true, on_false } => Expr::mux(
+            decoy_node(cond, rng, pool, memo),
+            decoy_node(on_true, rng, pool, memo),
+            decoy_node(on_false, rng, pool, memo),
+        ),
+    };
+
+    // ~1/7 ≈ 14% chance: wrap result in Xor(result, Xor(And(p,q), And(p,q))) == result ^ 0.
+    let result = if rng.next_u32() % 7 == 0 {
+        let i = (rng.next_u32() as usize) % pool.len();
+        let j = (rng.next_u32() as usize) % pool.len();
+        let p = pool[i].clone();
+        let q = pool[j].clone();
+        // Two separate Rc allocations → two separate AND gadgets in the circuit.
+        let and1 = Expr::and(p.clone(), q.clone());
+        let and2 = Expr::and(p, q);
+        Expr::xor(result, Expr::xor(and1, and2))
+    } else {
+        result
+    };
+
+    memo.insert(ptr, result.clone());
+    result
 }
 
 /// Randomly apply local algebraic identities at each node.
@@ -695,5 +787,46 @@ mod tests {
             let r = reassociate(&expr, &mut rng);
             assert_eq!(eval(&r, inputs), expected);
         }
+    }
+
+    // --- inject_decoys tests ---
+
+    #[test]
+    fn inject_decoys_preserves_semantics() {
+        let inputs = &[("a", 0xDEAD_BEEF_u32), ("b", 0xCAFE_BABE_u32)];
+        let expr = Expr::or(
+            Expr::xor(Expr::input("a"), Expr::input("b")),
+            Expr::and(Expr::input("a"), Expr::input("b")),
+        );
+        let expected = eval(&expr, inputs);
+        for seed in 0u64..20 {
+            let r = inject_decoys(&expr, &mut seeded_rng(seed));
+            assert_eq!(eval(&r, inputs), expected, "semantics changed at seed {seed}");
+        }
+    }
+
+    #[test]
+    fn inject_decoys_adds_and_gates() {
+        let expr = Expr::or(
+            Expr::xor(Expr::input("a"), Expr::input("b")),
+            Expr::and(Expr::input("a"), Expr::input("b")),
+        );
+        let base = lower_to_circuit(&expr)
+            .gadgets
+            .iter()
+            .filter(|g| matches!(g, crate::vm::Gadget::And { .. }))
+            .count();
+        let mut saw_more = false;
+        let mut rng = seeded_rng(0);
+        for _ in 0..50 {
+            let r = inject_decoys(&expr, &mut rng);
+            let n = lower_to_circuit(&r)
+                .gadgets
+                .iter()
+                .filter(|g| matches!(g, crate::vm::Gadget::And { .. }))
+                .count();
+            if n > base { saw_more = true; break; }
+        }
+        assert!(saw_more, "expected at least one decoy AND pair to appear across 50 runs");
     }
 }
