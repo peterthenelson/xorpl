@@ -55,7 +55,7 @@ pub fn inject_remasks(circuit: &Circuit, rng: &mut impl RngCore, rate: u32) -> C
             Gadget::And { a, b, .. } => {
                 let w = builder.and(r(*a), r(*b));
                 // Always eligible; apply with probability 1/rate.
-                if should_remask(rng, rate) {
+                if chance(rng, rate) {
                     Some(builder.remask(w))
                 } else {
                     Some(w)
@@ -80,7 +80,7 @@ pub fn inject_remasks(circuit: &Circuit, rng: &mut impl RngCore, rate: u32) -> C
                 | Gadget::Remask { .. } => w,
                 // Linear ops: apply remask with probability 1/rate.
                 _ => {
-                    if should_remask(rng, rate) {
+                    if chance(rng, rate) {
                         builder.remask(w)
                     } else {
                         w
@@ -99,8 +99,57 @@ pub fn inject_remasks(circuit: &Circuit, rng: &mut impl RngCore, rate: u32) -> C
     builder.build(remap[&circuit.egress])
 }
 
-fn should_remask(rng: &mut impl RngCore, rate: u32) -> bool {
+fn chance(rng: &mut impl RngCore, rate: u32) -> bool {
     rng.next_u32() % rate == 0
+}
+
+// ---------------------------------------------------------------------------
+// split_secret_consts
+// ---------------------------------------------------------------------------
+
+/// Probabilistically replace each `SecretConst(k)` with
+/// `Xor(SecretConst(a), SecretConst(k ^ a))` for a fresh random `a`.
+///
+/// Each occurrence is split independently with probability `1/rate`.  The
+/// resulting circuit is semantically identical — the two halves XOR back to
+/// `k` — but adds one generator and one `Xor` gadget per split, changing the
+/// constant pool size and generator count between rotations.
+///
+/// This has no expression-level analog: `SecretConst` as a distinct gadget
+/// type only exists after lowering.
+pub fn split_secret_consts(circuit: &Circuit, rng: &mut impl RngCore, rate: u32) -> Circuit {
+    let mut builder = Builder::new();
+    let mut remap: HashMap<WireId, WireId> = HashMap::new();
+
+    for g in &circuit.gadgets {
+        let t = |id: WireId| remap[&id];
+
+        match g {
+            Gadget::SecretConst { k, out, .. } => {
+                let new_out = if chance(rng, rate) {
+                    let a: u32 = rng.next_u32();
+                    let wa = builder.secret_const(a);
+                    let wb = builder.secret_const(k ^ a);
+                    builder.xor(wa, wb)
+                } else {
+                    builder.secret_const(*k)
+                };
+                remap.insert(*out, new_out);
+            }
+            // All other gadgets pass through with remapped inputs.
+            Gadget::Ingest { name, out, .. }     => { remap.insert(*out, builder.ingest(name)); }
+            Gadget::PublicConst { k, out }        => { remap.insert(*out, builder.public_const(*k)); }
+            Gadget::Xor { a, b, out }             => { remap.insert(*out, builder.xor(t(*a), t(*b))); }
+            Gadget::XorConst { a, k, out }        => { remap.insert(*out, builder.xor_const(t(*a), *k)); }
+            Gadget::AndConst { a, k, out }        => { remap.insert(*out, builder.and_const(t(*a), *k)); }
+            Gadget::Rotl { a, r, out }            => { remap.insert(*out, builder.rotl(t(*a), *r)); }
+            Gadget::And { a, b, out, .. }         => { remap.insert(*out, builder.and(t(*a), t(*b))); }
+            Gadget::Remask { a, out, .. }         => { remap.insert(*out, builder.remask(t(*a))); }
+            Gadget::Egress { .. }                 => {}
+        }
+    }
+
+    builder.build(remap[&circuit.egress])
 }
 
 // ---------------------------------------------------------------------------
@@ -202,5 +251,58 @@ mod tests {
             verify_transform(&circuit, &transformed,
                 &[("a", av), ("b", bv), ("c", cv), ("d", dv)], expected);
         }
+    }
+
+    #[test]
+    fn split_secret_consts_preserves_semantics() {
+        let a = Expr::input("a");
+        let b = Expr::input("b");
+        let c = Expr::secret_const(0x9e37_79b9);
+        let expr = Expr::rotl(Expr::xor(Expr::or(a, b), c), 5);
+        let circuit = lower_to_circuit(&expr);
+
+        let av: u32 = 0x1234_5678;
+        let bv: u32 = 0xDEAD_BEEF;
+        let expected = ((av | bv) ^ 0x9e37_79b9u32).rotate_left(5);
+
+        for seed in 0u64..8 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let transformed = split_secret_consts(&circuit, &mut rng, 1);
+            verify_transform(&circuit, &transformed, &[("a", av), ("b", bv)], expected);
+        }
+    }
+
+    #[test]
+    fn split_secret_consts_increases_gadget_count() {
+        let expr = Expr::secret_const(0xDEAD_BEEF);
+        let circuit = lower_to_circuit(&expr);
+        let secret_count_before = circuit.gadgets.iter()
+            .filter(|g| matches!(g, Gadget::SecretConst { .. }))
+            .count();
+
+        // rate=1 always splits — should produce two SecretConst gadgets + one Xor.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let transformed = split_secret_consts(&circuit, &mut rng, 1);
+        let secret_count_after = transformed.gadgets.iter()
+            .filter(|g| matches!(g, Gadget::SecretConst { .. }))
+            .count();
+
+        assert_eq!(secret_count_before, 1);
+        assert_eq!(secret_count_after, 2, "split should produce two SecretConst gadgets");
+        assert!(transformed.gadgets.iter().any(|g| matches!(g, Gadget::Xor { .. })),
+            "split should insert a Xor gadget");
+    }
+
+    #[test]
+    fn split_secret_consts_no_secret_consts_is_noop() {
+        // A circuit with no SecretConst gadgets should be structurally unchanged.
+        let expr = Expr::xor(Expr::input("a"), Expr::input("b"));
+        let circuit = lower_to_circuit(&expr);
+        let gadget_count_before = circuit.gadgets.len();
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let transformed = split_secret_consts(&circuit, &mut rng, 1);
+        assert_eq!(transformed.gadgets.len(), gadget_count_before,
+            "no SecretConst gadgets means nothing to split");
     }
 }

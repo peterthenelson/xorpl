@@ -8,7 +8,8 @@
 //! # Stage sequence
 //!
 //! ```text
-//! Expr ──strong_rotate──► Expr' ──lower──► Circuit ──inject_remasks──► Circuit' ──from_circuit──► MaskedCircuit
+//! Expr ──strong_rotate──► Expr' ──lower──► Circuit ──inject_remasks──► Circuit'
+//!   ──split_secret_consts──► Circuit'' ──from_circuit──► MaskedCircuit
 //! ```
 //!
 //! The server receives [`Compilation::circuit`] and verifies checksums by
@@ -20,7 +21,7 @@ use std::rc::Rc;
 use rand::RngCore;
 
 use crate::circuit::Circuit;
-use crate::circuit_transform::inject_remasks;
+use crate::circuit_transform::{inject_remasks, split_secret_consts};
 use crate::emit::emit_rust;
 use crate::expr::Expr;
 use crate::expr_transform::strong_rotate;
@@ -54,8 +55,9 @@ pub struct Compilation {
 /// 1. `strong_rotate` — structural expression-level obfuscation.
 /// 2. `lower_to_circuit` — deterministic lowering to a value graph.
 /// 3. `inject_remasks` at rate 1-in-4 — post-lowering mask re-randomization.
-/// 4. `MaskedCircuit::from_circuit` — concretization.
-/// 5. `emit_rust` — code generation into `Compilation::code`.
+/// 4. `split_secret_consts` at rate 1-in-3 — probabilistic constant splitting.
+/// 5. `MaskedCircuit::from_circuit` — concretization.
+/// 6. `emit_rust` — code generation into `Compilation::code`.
 ///
 /// `fn_name` becomes the emitted function's name and must be a valid Rust
 /// identifier.  All randomness comes from `rng`; the caller seeds it however
@@ -64,6 +66,7 @@ pub fn compile(expr: Rc<Expr>, fn_name: &str, rng: &mut impl RngCore) -> Compila
     let transformed = strong_rotate(&expr, rng);
     let circuit     = lower_to_circuit(&transformed);
     let circuit     = inject_remasks(&circuit, rng, 4);
+    let circuit     = split_secret_consts(&circuit, rng, 3);
     let masked      = MaskedCircuit::from_circuit(&circuit, rng);
     let code        = emit_rust(&masked, &circuit, fn_name, rng);
     Compilation { original_expr: expr, circuit, masked, code }
