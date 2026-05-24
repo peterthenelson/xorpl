@@ -479,6 +479,27 @@ fn collect_candidates(
     }
 }
 
+/// Wrap `node` in an XOR-zero decoy: `node ^ (and(p,q) ^ and(p,q)) = node`.
+///
+/// Adds two AND triples that consume Beaver coefficients without contributing
+/// to the output.  The two `And` nodes are distinct `Rc` allocations so they
+/// produce separate gadgets in the circuit.
+pub fn decoy_xor_zero(node: Rc<Expr>, p: Rc<Expr>, q: Rc<Expr>) -> Rc<Expr> {
+    let and1 = Expr::and(p.clone(), q.clone());
+    let and2 = Expr::and(p, q);
+    Expr::xor(node, Expr::xor(and1, and2))
+}
+
+/// Wrap `node` in a MUX dead-branch decoy.
+///
+/// Constructs `Mux(secret_const(0xFFFF_FFFF), node, garbage)`, which always
+/// evaluates to `node`.  The `secret_const` is masked in the pool so the
+/// condition appears as a random u32; from the dataflow graph `garbage` looks
+/// like a live input that could influence the output.
+pub fn decoy_mux(node: Rc<Expr>, garbage: Rc<Expr>) -> Rc<Expr> {
+    Expr::mux(Expr::secret_const(0xFFFF_FFFF), node, garbage)
+}
+
 fn decoy_node(
     expr: &Rc<Expr>,
     rng:  &mut impl rand::RngCore,
@@ -527,20 +548,16 @@ fn decoy_node(
         let q = pool[j].clone();
 
         if style % 2 == 0 {
-            // Style A: XOR-zero. result ^ (and(p,q) ^ and(p,q)) = result ^ 0 = result.
-            // Two separate Rc allocations → two separate AND gadgets in the circuit.
-            let and1 = Expr::and(p.clone(), q.clone());
-            let and2 = Expr::and(p, q);
-            Expr::xor(result, Expr::xor(and1, and2))
+            // Style A: XOR-zero.
+            decoy_xor_zero(result, p, q)
         } else {
-            // Style B: MUX with dead branch.  The secret_const condition is masked in
-            // the pool (looks like a random u32); `garbage` is dead but looks live.
+            // Style B: MUX with dead branch.
             let garbage = Expr::and(p, q);
             if style % 4 == 1 {
-                // cond = all-ones → always selects on_true = result.
-                Expr::mux(Expr::secret_const(0xFFFF_FFFF), result, garbage)
+                // cond = all-ones → node in on_true.
+                decoy_mux(result, garbage)
             } else {
-                // cond = all-zeros → always selects on_false = result.
+                // cond = all-zeros → node in on_false.
                 Expr::mux(Expr::secret_const(0), garbage, result)
             }
         }
