@@ -224,6 +224,124 @@ impl Circuit {
     }
 }
 
+// ---------- circuit builder ----------
+pub struct Builder {
+    wires:      Vec<Wire>,
+    gadgets:    Vec<Gadget>,
+    generators: Vec<Generator>,
+}
+
+impl Builder {
+    pub fn new() -> Self {
+        Self { wires: vec![], gadgets: vec![], generators: vec![] }
+    }
+
+    fn alloc_wire(&mut self, role: Wire) -> WireId {
+        let id = self.wires.len();
+        self.wires.push(role);
+        id
+    }
+
+    fn alloc_gen(&mut self, purpose: &'static str) -> GenId {
+        let id = self.generators.len();
+        self.generators.push(Generator { purpose });
+        id
+    }
+
+    pub fn ingest(&mut self, name: &str) -> WireId {
+        let gen = self.alloc_gen("ingest");
+        let out = self.alloc_wire(Wire::Ingest);
+        self.gadgets.push(Gadget::Ingest { name: name.to_string(), gen, out });
+        out
+    }
+
+    pub fn secret_const(&mut self, k: u32) -> WireId {
+        let gen = self.alloc_gen("secret const");
+        let out = self.alloc_wire(Wire::Internal);
+        self.gadgets.push(Gadget::SecretConst { k, gen, out });
+        out
+    }
+
+    pub fn xor(&mut self, a: WireId, b: WireId) -> WireId {
+        let out = self.alloc_wire(Wire::Internal);
+        self.gadgets.push(Gadget::Xor { a, b, out });
+        out
+    }
+
+    pub fn and_const(&mut self, a: WireId, k: u32) -> WireId {
+        let out = self.alloc_wire(Wire::Internal);
+        self.gadgets.push(Gadget::AndConst { a, k, out });
+        out
+    }
+
+    pub fn rotl(&mut self, a: WireId, r: u32) -> WireId {
+        let out = self.alloc_wire(Wire::Internal);
+        self.gadgets.push(Gadget::Rotl { a, r, out });
+        out
+    }
+
+    pub fn and(&mut self, a: WireId, b: WireId) -> WireId {
+        let gen = self.alloc_gen("AND");
+        let out = self.alloc_wire(Wire::Internal);
+        self.gadgets.push(Gadget::And { a, b, gen, out });
+        out
+    }
+
+    /// 32-bit wrapping addition using the word-level generate optimization.
+    ///
+    /// Cost: 1 triple for `G = A & B` (all 32 generate bits at once), plus
+    /// 30 triples for the carry-propagate chain (bits 1–30; bit 0 has carry-in
+    /// 0 so it's free, and bit 31 needs no carry-out).  Total: 31 triples.
+    ///
+    /// Each carry `c[i]` lives at bit position `i` in a u32 word (all other
+    /// bits zero).  `rotl(..., 1)` advances it to position `i+1`.  Because
+    /// `p[i]` and `c[i]` each occupy only bit `i`, their AND is a one-bit
+    /// operation even though the gadget works on the full word.
+    pub fn add32(&mut self, a: WireId, b: WireId) -> WireId {
+        let g_word = self.and(a, b);    // g_word[i] = a[i] & b[i] for all 32 bits
+        let p_word = self.xor(a, b);    // p_word[i] = a[i] ^ b[i] for all 32 bits
+
+        // Bit 0: carry-in is 0, so s[0] = p[0] and c[1] = g[0].
+        let s_0 = self.and_const(p_word, 1);
+        let g_0 = self.and_const(g_word, 1);
+        let c_1 = self.rotl(g_0, 1);           // c[1] lives at bit position 1
+
+        let mut carry = c_1;  // c[i] at bit position i
+        let mut sum   = s_0;  // accumulated sum, one settled bit per position
+
+        for i in 1u32..=31 {
+            let mask = 1u32 << i;
+            let p_i = self.and_const(p_word, mask);   // p[i] at bit i, rest 0
+            let s_i = self.xor(p_i, carry);           // s[i] = p[i] ^ c[i]
+            sum = self.xor(sum, s_i);
+
+            if i < 31 {
+                // c[i+1] = g[i] ^ (p[i] & c[i])
+                let g_i       = self.and_const(g_word, mask);
+                let p_and_c   = self.and(p_i, carry);         // p[i] & c[i], at bit i
+                let carry_at_i = self.xor(g_i, p_and_c);
+                carry = self.rotl(carry_at_i, 1);             // advance to bit i+1
+            }
+        }
+
+        sum
+    }
+
+    /// Finalise the circuit, marking `result` as the egress wire.
+    pub fn build(mut self, result: WireId) -> Circuit {
+        self.wires[result] = Wire::Egress;
+        self.gadgets.push(Gadget::Egress { a: result });
+        let c = Circuit {
+            egress: result,
+            gadgets: self.gadgets,
+            wires: self.wires,
+            generators: self.generators,
+        };
+        c.validate().expect("Builder::build produced an invalid circuit");
+        c
+    }
+}
+
 // ---------- what gets baked into a concrete VM image ----------
 #[derive(Clone, Debug)]
 pub struct BakedGadget {
@@ -420,37 +538,28 @@ impl ConcreteVm {
 // =====================================================================
 const C: u32 = 0x9e37_79b9;
 
+// F(a, b) = rotl((a | b) ^ C, 5)
+//   a|b expanded as (a^b)^(a&b) to exercise the metered AND.
 pub fn build_example() -> Circuit {
-    let wires = vec![
-        Wire::Ingest,    // 0: a
-        Wire::Ingest,    // 1: b
-        Wire::Internal,  // 2: C (secret const)
-        Wire::Internal,  // 3: a ^ b
-        Wire::Internal,  // 4: a & b
-        Wire::Internal,  // 5: a | b
-        Wire::Internal,  // 6: (a|b) ^ C
-        Wire::Egress,    // 7: rotl(.., 5)
-    ];
-    let gadgets = vec![
-        Gadget::Ingest { name: "a".to_string(), gen: 0, out: 0 },
-        Gadget::Ingest { name: "b".to_string(), gen: 1, out: 1 },
-        Gadget::SecretConst { k: C, gen: 2, out: 2 },
-        Gadget::Xor { a: 0, b: 1, out: 3 },         // a ^ b
-        Gadget::And { a: 0, b: 1, gen: 3, out: 4 }, // a & b   (metered)
-        Gadget::Xor { a: 3, b: 4, out: 5 },         // (a^b)^(a&b) = a|b
-        Gadget::Xor { a: 5, b: 2, out: 6 },         // (a|b) ^ C
-        Gadget::Rotl { a: 6, r: 5, out: 7 },        // rotl(.., 5)
-        Gadget::Egress { a: 7 },
-    ];
-    let generators = vec![
-        Generator { purpose: "ingest a" },
-        Generator { purpose: "ingest b" },
-        Generator { purpose: "secret const C" },
-        Generator { purpose: "AND output mask" },
-    ];
-    let circuit = Circuit { gadgets, wires, generators, egress: 7 };
-    circuit.validate().expect("build_example produced an invalid circuit");
-    circuit
+    let mut b     = Builder::new();
+    let wa        = b.ingest("a");
+    let wb        = b.ingest("b");
+    let wc        = b.secret_const(C);
+    let a_xor_b   = b.xor(wa, wb);
+    let a_and_b   = b.and(wa, wb);
+    let a_or_b    = b.xor(a_xor_b, a_and_b);
+    let xored     = b.xor(a_or_b, wc);
+    let result    = b.rotl(xored, 5);
+    b.build(result)
+}
+
+// F(a, b) = a + b (wrapping 32-bit addition) via the word-level ADD32.
+pub fn build_add32_example() -> Circuit {
+    let mut b  = Builder::new();
+    let wa     = b.ingest("a");
+    let wb     = b.ingest("b");
+    let result = b.add32(wa, wb);
+    b.build(result)
 }
 
 // reference (server) F, computed straight
@@ -534,6 +643,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ADD32 must compute wrapping 32-bit addition across all rotations.
+    #[test]
+    fn add32_matches_wrapping_add() {
+        let c = build_add32_example();
+        let mut rng = StdRng::seed_from_u64(0xcafe_babe);
+        for _ in 0..20 {
+            let seed: u64 = rng.random();
+            let vm = ConcreteVm::from_circuit(&c, seed);
+            for _ in 0..20 {
+                let (a, b) = (rng.random::<u32>(), rng.random::<u32>());
+                let inputs = make_inputs(a, b);
+                let values = c.eval(&inputs);
+                let (_, revealed) = vm.eval(&inputs);
+                assert_eq!(values[&c.egress], a.wrapping_add(b), "value graph != wrapping_add");
+                assert_eq!(revealed, a.wrapping_add(b), "ADD32 egress mismatch (seed={:#x})", seed);
+            }
+        }
+    }
+
+    // Structural: word-level optimization should cost exactly 31 triples.
+    #[test]
+    fn add32_uses_31_triples() {
+        let c = build_add32_example();
+        let count = c.gadgets.iter().filter(|g| matches!(g, Gadget::And { .. })).count();
+        // 1 for G = A & B (all 32 generate bits) + 30 for carry propagate (bits 1–30)
+        assert_eq!(count, 31, "ADD32 triple count");
     }
 
     // Every ingest wire must have a nonzero mask (non-degeneracy), and its
