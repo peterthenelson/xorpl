@@ -26,6 +26,7 @@ use rand::rngs::StdRng;
 
 use xorpl::prelude::*;
 use xorpl::fixture_defs::ALL_FIXTURES;
+use xorpl::expr::expr_digest;
 
 // ---------------------------------------------------------------------------
 // Correctness tests
@@ -280,10 +281,13 @@ mod sha256_qr {
 #[test]
 fn fixtures_not_out_of_sync() {
     for def in ALL_FIXTURES {
+        let original = (def.build)();
+        let digest   = expr_digest(&original, None);
+
         let circuit = lower_to_circuit(&def.expr());
         let mut rng = StdRng::seed_from_u64(def.seed);
         let masked  = MaskedCircuit::from_circuit(&circuit, &mut rng);
-        let emitted = emit_rust(&masked, &circuit, def.name, &mut rng);
+        let emitted = emit_rust(&masked, &circuit, def.name, &mut rng, &digest);
 
         let path = format!("tests/fixtures/{}.rs", def.name);
         let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -293,9 +297,10 @@ fn fixtures_not_out_of_sync() {
             "fixture `{}.rs` is out of sync — run `cargo run --bin regen_fixtures`",
             def.name);
 
-        let verify_name = format!("{}_verify", def.name);
-        let verifier = emit_verifier_rust(&circuit, &verify_name);
-        let verify_path = format!("tests/fixtures/{}_verify.rs", def.name);
+        let canonical    = lower_to_circuit(&original);
+        let verify_name  = format!("{}_verify", def.name);
+        let verifier     = emit_verifier_rust(&canonical, &verify_name, &digest);
+        let verify_path  = format!("tests/fixtures/{}_verify.rs", def.name);
         let verifier_on_disk = std::fs::read_to_string(&verify_path).unwrap_or_else(|e| {
             panic!("cannot read {verify_path}: {e}\nRun `cargo run --bin regen_fixtures`")
         });
@@ -316,7 +321,7 @@ fn verifier_parameters_use_input_prefix() {
     // Use input names that match the wire-id namespace — the pattern that
     // previously caused shadowing before the `input_` prefix was introduced.
     let circuit = lower_to_circuit(&Expr::xor(Expr::input("w0"), Expr::input("w7")));
-    let verifier = emit_verifier_rust(&circuit, "verify");
+    let verifier = emit_verifier_rust(&circuit, "verify", &[0u8; 32]);
     assert!(verifier.contains("input_w0: u32"), "expected input_w0 parameter:\n{verifier}");
     assert!(verifier.contains("input_w7: u32"), "expected input_w7 parameter:\n{verifier}");
     assert!(verifier.contains("let w0 = input_w0;"), "expected ingest binding:\n{verifier}");
@@ -330,13 +335,14 @@ fn verifier_parameters_use_input_prefix() {
 #[test]
 fn structural_properties() {
     for def in ALL_FIXTURES {
+        let digest  = expr_digest(&(def.build)(), None);
         let circuit = lower_to_circuit(&def.expr());
         let mut rng = StdRng::seed_from_u64(def.seed);
         let masked  = MaskedCircuit::from_circuit(&circuit, &mut rng);
-        let emitted = emit_rust(&masked, &circuit, def.name, &mut rng);
+        let emitted = emit_rust(&masked, &circuit, def.name, &mut rng, &digest);
 
-        assert!(emitted.contains("pub const ROTATION_TAG"),
-            "[{}] missing `pub const ROTATION_TAG`", def.name);
+        assert!(emitted.contains("pub const EXPR_DIGEST"),
+            "[{}] missing `pub const EXPR_DIGEST`", def.name);
         assert!(emitted.contains("const POOL"),
             "[{}] missing `const POOL`", def.name);
         assert!(emitted.contains(&format!("pub fn {}(", def.name)),

@@ -1,21 +1,27 @@
 //! Standard compilation pipeline: `Expr` → deployable Rust source.
 //!
-//! [`compile`] wires the canonical stage sequence together.  Callers that
-//! need to test or demonstrate a specific transform in isolation should call
-//! the individual stage functions directly — bypassing this module is
-//! intentional and supported.
+//! [`compile`] wires the canonical obfuscation stage sequence together.
+//! [`compile_verifier`] produces the corresponding plaintext server artifact
+//! from the same original expression.  Both embed the same [`EXPR_DIGEST`]
+//! constant so the server can match browser artifacts to the right verifier.
 //!
 //! # Stage sequence
 //!
 //! ```text
-//! Expr ──strong_rotate──► Expr' ──lower──► Circuit ──inject_remasks──► Circuit'
-//!   ──split_secret_consts──► Circuit'' ──from_circuit──► MaskedCircuit
+//! Original Expr ──expr_digest──► [u8; 32]  (stable tag — never changes)
+//!       │
+//!       ├─► lower_to_circuit ──► Circuit ──► emit_verifier_rust  (server)
+//!       │         (canonical, no transforms)
+//!       │
+//!       └─► strong_rotate ──► Expr' ──lower──► Circuit'
+//!             ──inject_remasks──► ──split_secret_consts──►
+//!             ──from_circuit──► MaskedCircuit ──► emit_rust       (browser)
 //! ```
 //!
-//! The server receives [`Compilation::circuit`] (identified by
-//! [`Compilation::rotation_tag`]) and verifies checksums via
-//! [`Circuit::eval`].  The browser receives [`Compilation::code`] compiled
-//! to Wasm, plus a server verifier emitted by [`crate::emit::emit_verifier_rust`].
+//! The `EXPR_DIGEST` embedded in both artifacts comes from the original
+//! expression *before* any transforms.  This means cheap rotation, strong
+//! rotation, and any future obfuscation variant all produce the same digest,
+//! so the server verifier never needs to be redeployed for a rotation.
 
 use std::rc::Rc;
 
@@ -23,8 +29,8 @@ use rand::RngCore;
 
 use crate::circuit::Circuit;
 use crate::circuit_transform::{inject_remasks, split_secret_consts};
-use crate::emit::emit_rust;
-use crate::expr::Expr;
+use crate::emit::{emit_rust, emit_verifier_rust};
+use crate::expr::{expr_digest, Expr};
 use crate::expr_transform::strong_rotate;
 use crate::lower::lower_to_circuit;
 use crate::mask::MaskedCircuit;
@@ -42,56 +48,74 @@ pub struct Compilation {
     pub circuit: Circuit,
     /// Concretized client artifact — baked masks, constants, and triples.
     pub masked: MaskedCircuit,
-    /// Structural fingerprint of [`Compilation::circuit`].  Stable across
-    /// cheap rotations (same circuit, new masks); changes on strong rotation.
-    /// The browser bakes this into its Wasm export and sends it with every
-    /// event report so the server can select the matching verifier.
-    pub rotation_tag: u32,
+    /// Stable digest of [`Compilation::original_expr`].  Identical for every
+    /// rotation (cheap or strong) of the same expression.  Embedded in both
+    /// the browser artifact and the server verifier so the server can match
+    /// incoming reports to the right verifier without redeployment.
+    pub expr_digest: [u8; 32],
     /// Emitted Rust source — the deployable client function.
     pub code: String,
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline entry point
+// Pipeline entry points
 // ---------------------------------------------------------------------------
 
-/// Run the full compilation pipeline on `expr`.
+/// Run the full obfuscation pipeline on `expr`.
 ///
 /// Stages applied, in order:
-/// 1. `strong_rotate` — structural expression-level obfuscation.
-/// 2. `lower_to_circuit` — deterministic lowering to a value graph.
-/// 3. `inject_remasks` at rate 1-in-4 — post-lowering mask re-randomization.
-/// 4. `split_secret_consts` at rate 1-in-3 — probabilistic constant splitting.
-/// 5. `MaskedCircuit::from_circuit` — concretization.
-/// 6. `emit_rust` — code generation into `Compilation::code`.
+/// 1. `expr_digest` — stable tag from the original expression (before any
+///    transforms); embedded in the emitted output as `EXPR_DIGEST`.
+/// 2. `strong_rotate` — structural expression-level obfuscation.
+/// 3. `lower_to_circuit` — deterministic lowering to a value graph.
+/// 4. `inject_remasks` at rate 1-in-4 — post-lowering mask re-randomization.
+/// 5. `split_secret_consts` at rate 1-in-3 — probabilistic constant splitting.
+/// 6. `MaskedCircuit::from_circuit` — concretization.
+/// 7. `emit_rust` — code generation into `Compilation::code`.
 ///
 /// `fn_name` becomes the emitted function's name and must be a valid Rust
 /// identifier.  All randomness comes from `rng`; the caller seeds it however
 /// they like.
-/// Re-concretize an existing circuit with fresh randomness — a cheap rotation.
 ///
-/// The circuit structure (and therefore [`Compilation::rotation_tag`]) is
-/// unchanged; only the mask seed advances, so the emitted `POOL` constants
-/// differ from the previous rotation.  Use this to rotate the browser's Wasm
-/// bundle frequently without redeploying the server verifier.
-///
-/// Returns the new `MaskedCircuit` and emitted browser source.  The
-/// `rotation_tag` to advertise is still `compilation.rotation_tag`.
-pub fn rotate_cheap(compilation: &Compilation, fn_name: &str, rng: &mut impl RngCore) -> (MaskedCircuit, String) {
-    let masked = MaskedCircuit::from_circuit(&compilation.circuit, rng);
-    let code   = emit_rust(&masked, &compilation.circuit, fn_name, rng);
-    (masked, code)
+/// `key` is an optional HMAC key: `None` produces a plain SHA-256 digest of
+/// the expression; `Some(k)` produces HMAC-SHA-256(k, expr), which prevents
+/// observers from verifying guesses about the original expression from the
+/// embedded digest.  Use the same key for `compile` and `compile_verifier` so
+/// the digests match.
+pub fn compile(expr: Rc<Expr>, fn_name: &str, rng: &mut impl RngCore, key: Option<&[u8]>) -> Compilation {
+    let digest      = expr_digest(&expr, key);
+    let transformed = strong_rotate(&expr, rng);
+    let circuit     = lower_to_circuit(&transformed);
+    let circuit     = inject_remasks(&circuit, rng, 4);
+    let circuit     = split_secret_consts(&circuit, rng, 3);
+    let masked      = MaskedCircuit::from_circuit(&circuit, rng);
+    let code        = emit_rust(&masked, &circuit, fn_name, rng, &digest);
+    Compilation { original_expr: expr, circuit, masked, expr_digest: digest, code }
 }
 
-pub fn compile(expr: Rc<Expr>, fn_name: &str, rng: &mut impl RngCore) -> Compilation {
-    let transformed  = strong_rotate(&expr, rng);
-    let circuit      = lower_to_circuit(&transformed);
-    let circuit      = inject_remasks(&circuit, rng, 4);
-    let circuit      = split_secret_consts(&circuit, rng, 3);
-    let rotation_tag = circuit.fingerprint();
-    let masked       = MaskedCircuit::from_circuit(&circuit, rng);
-    let code         = emit_rust(&masked, &circuit, fn_name, rng);
-    Compilation { original_expr: expr, circuit, masked, rotation_tag, code }
+/// Emit the plaintext server verifier for `expr`.
+///
+/// Lowers the original expression directly (no obfuscation transforms) and
+/// emits an unmasked evaluation function.  The embedded `EXPR_DIGEST` matches
+/// that produced by [`compile`] for the same `expr` and `key`.
+pub fn compile_verifier(expr: &Rc<Expr>, fn_name: &str, key: Option<&[u8]>) -> String {
+    let digest  = expr_digest(expr, key);
+    let circuit = lower_to_circuit(expr);
+    emit_verifier_rust(&circuit, fn_name, &digest)
+}
+
+/// Re-concretize an existing circuit with fresh randomness — a cheap rotation.
+///
+/// The circuit structure and [`Compilation::expr_digest`] are unchanged; only
+/// the mask seed advances, so the emitted `POOL` constants differ.  Use this
+/// to rotate the browser's Wasm bundle frequently without redeploying the
+/// server verifier.
+///
+/// Returns the new `MaskedCircuit` and emitted browser source.
+pub fn rotate_cheap(compilation: &Compilation, fn_name: &str, rng: &mut impl RngCore) -> (MaskedCircuit, String) {
+    let masked = MaskedCircuit::from_circuit(&compilation.circuit, rng);
+    let code   = emit_rust(&masked, &compilation.circuit, fn_name, rng, &compilation.expr_digest);
+    (masked, code)
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +133,7 @@ mod tests {
 
         for pipeline_seed in 0u64..4 {
             let mut rng = rand::rngs::StdRng::seed_from_u64(pipeline_seed);
-            let c = compile(Rc::clone(&expr), "checksum", &mut rng);
+            let c = compile(Rc::clone(&expr), "checksum", &mut rng, None);
 
             let vals = c.circuit.eval(&input_map);
             assert_eq!(vals[&c.circuit.egress], expected,
@@ -178,7 +202,7 @@ mod tests {
         let expr = Rc::new(Expr::rotl(Expr::xor(Expr::or(a, b), c), 5));
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-        let orig = compile(Rc::clone(&expr), "f", &mut rng);
+        let orig = compile(Rc::clone(&expr), "f", &mut rng, None);
 
         let mut rng2 = rand::rngs::StdRng::seed_from_u64(99);
         let (masked2, code2) = rotate_cheap(&orig, "f", &mut rng2);
@@ -196,41 +220,29 @@ mod tests {
     }
 
     #[test]
-    fn rotate_cheap_embeds_same_rotation_tag() {
+    fn rotate_cheap_embeds_same_expr_digest() {
         let expr = Rc::new(Expr::xor(Expr::input("a"), Expr::input("b")));
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-        let orig = compile(Rc::clone(&expr), "f", &mut rng);
+        let orig = compile(Rc::clone(&expr), "f", &mut rng, None);
 
         let mut rng2 = rand::rngs::StdRng::seed_from_u64(1);
-        let (_masked, code) = rotate_cheap(&orig, "f", &mut rng2);
+        let (_masked, code2) = rotate_cheap(&orig, "f", &mut rng2);
 
-        let tag_hex = format!("0x{:08x}", orig.rotation_tag);
-        assert!(code.contains(&tag_hex),
-            "cheap rotation must embed the same ROTATION_TAG {tag_hex}");
+        // Both emitted sources must contain the same EXPR_DIGEST constant.
+        let digest_line = |s: &str| s.lines()
+            .skip_while(|l| !l.contains("EXPR_DIGEST"))
+            .take_while(|l| !l.contains("];"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(digest_line(&orig.code), digest_line(&code2),
+            "cheap rotation must embed the same EXPR_DIGEST");
     }
 
     #[test]
-    fn rotation_tag_stable_across_cheap_rotation() {
-        // Cheap rotation = same circuit, new MaskedCircuit seed.
-        // Fingerprint depends only on the Circuit, so it must not change.
-        let a = Expr::input("a");
-        let b = Expr::input("b");
-        let c = Expr::secret_const(0x9e37_79b9);
-        let expr = Rc::new(Expr::rotl(Expr::xor(Expr::or(a, b), c), 5));
-
-        // Use the same strong-rotate seed so the circuit structure is identical.
-        let mut rng1 = rand::rngs::StdRng::seed_from_u64(0);
-        let mut rng2 = rand::rngs::StdRng::seed_from_u64(0);
-
-        let c1 = compile(Rc::clone(&expr), "f", &mut rng1);
-        let c2 = compile(Rc::clone(&expr), "f", &mut rng2);
-
-        assert_eq!(c1.rotation_tag, c2.rotation_tag,
-            "same pipeline seed must yield same rotation_tag");
-    }
-
-    #[test]
-    fn rotation_tag_differs_across_strong_rotation() {
+    fn expr_digest_stable_for_same_expr() {
+        // The digest is derived from the original expression before any
+        // obfuscation transforms, so it must be identical regardless of the
+        // RNG seed used for strong_rotate or masking.
         let a = Expr::input("a");
         let b = Expr::input("b");
         let c = Expr::secret_const(0x9e37_79b9);
@@ -239,10 +251,55 @@ mod tests {
         let mut rng1 = rand::rngs::StdRng::seed_from_u64(1);
         let mut rng2 = rand::rngs::StdRng::seed_from_u64(2);
 
-        let c1 = compile(Rc::clone(&expr), "f", &mut rng1);
-        let c2 = compile(Rc::clone(&expr), "f", &mut rng2);
+        let c1 = compile(Rc::clone(&expr), "f", &mut rng1, None);
+        let c2 = compile(Rc::clone(&expr), "f", &mut rng2, None);
 
-        assert_ne!(c1.rotation_tag, c2.rotation_tag,
-            "different pipeline seeds should (almost certainly) yield different rotation_tags");
+        assert_eq!(c1.expr_digest, c2.expr_digest,
+            "same expr must always yield the same digest regardless of rng seed");
+    }
+
+    #[test]
+    fn expr_digest_differs_for_different_exprs() {
+        let expr1 = Expr::xor(Expr::input("a"), Expr::input("b"));
+        let expr2 = Expr::and(Expr::input("a"), Expr::input("b"));
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let c1 = compile(expr1, "f", &mut rng, None);
+        let c2 = compile(expr2, "f", &mut rng, None);
+
+        assert_ne!(c1.expr_digest, c2.expr_digest);
+    }
+
+    #[test]
+    fn expr_digest_differs_with_different_keys() {
+        let expr = Rc::new(Expr::xor(Expr::input("a"), Expr::input("b")));
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let c1 = compile(Rc::clone(&expr), "f", &mut rng, None);
+        let c2 = compile(Rc::clone(&expr), "f", &mut rng, Some(b"secret"));
+
+        assert_ne!(c1.expr_digest, c2.expr_digest,
+            "keyed digest must differ from unkeyed digest");
+    }
+
+    #[test]
+    fn compile_verifier_matches_compile_digest() {
+        let a = Expr::input("a");
+        let b = Expr::input("b");
+        let c = Expr::secret_const(0x9e37_79b9);
+        let expr = Rc::new(Expr::rotl(Expr::xor(Expr::or(a, b), c), 5));
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let compilation = compile(Rc::clone(&expr), "f", &mut rng, None);
+        let verifier    = compile_verifier(&expr, "f_verify", None);
+
+        // Both artifacts embed the same EXPR_DIGEST.
+        let digest_line = |s: &str| s.lines()
+            .skip_while(|l| !l.contains("EXPR_DIGEST"))
+            .take_while(|l| !l.contains("];"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(digest_line(&compilation.code), digest_line(&verifier),
+            "browser artifact and verifier must embed the same EXPR_DIGEST");
     }
 }

@@ -10,6 +10,8 @@ fixture-defs = []
 
 [dependencies]
 rand = "0.9.1"
+sha2 = "0.10"
+hmac = "0.12"
 
 [[bin]]
 name = "demo"

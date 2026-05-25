@@ -141,57 +141,6 @@ pub struct Circuit {
 }
 
 impl Circuit {
-    /// Stable structural fingerprint of the circuit — a hash of gadget types,
-    /// wire topology, and constants.  Identical circuits always produce the
-    /// same tag; structurally distinct circuits almost certainly differ.
-    ///
-    /// The tag is used as a rotation discriminant: the browser includes it in
-    /// every event report, and the server uses it to select the matching
-    /// verifier function.  It is NOT a security primitive — just a version key.
-    pub fn fingerprint(&self) -> u32 {
-        const OFFSET: u64 = 0xcbf29ce484222325;
-        const PRIME:  u64 = 0x100000001b3;
-
-        fn mix(mut h: u64, v: u64) -> u64 {
-            for b in v.to_le_bytes() {
-                h ^= b as u64;
-                h  = h.wrapping_mul(PRIME);
-            }
-            h
-        }
-
-        let mut h = OFFSET;
-        for g in &self.gadgets {
-            h = match g {
-                Gadget::PublicConst { k, out } =>
-                    mix(mix(mix(h, 0), *k as u64), *out as u64),
-                Gadget::SecretConst { k, out, .. } =>
-                    mix(mix(mix(h, 1), *k as u64), *out as u64),
-                Gadget::Ingest { name, out, .. } => {
-                    let mut h = mix(h, 2);
-                    for b in name.bytes() { h = mix(h, b as u64); }
-                    mix(h, *out as u64)
-                }
-                Gadget::Xor { a, b, out } =>
-                    mix(mix(mix(mix(h, 3), *a as u64), *b as u64), *out as u64),
-                Gadget::XorConst { a, k, out } =>
-                    mix(mix(mix(mix(h, 4), *a as u64), *k as u64), *out as u64),
-                Gadget::AndConst { a, k, out } =>
-                    mix(mix(mix(mix(h, 5), *a as u64), *k as u64), *out as u64),
-                Gadget::Rotl { a, r, out } =>
-                    mix(mix(mix(mix(h, 6), *a as u64), *r as u64), *out as u64),
-                Gadget::And { a, b, out, .. } =>
-                    mix(mix(mix(mix(h, 7), *a as u64), *b as u64), *out as u64),
-                Gadget::Remask { a, out, .. } =>
-                    mix(mix(mix(h, 8), *a as u64), *out as u64),
-                Gadget::Egress { a } =>
-                    mix(mix(h, 9), *a as u64),
-            };
-        }
-        let (lo, hi) = (h as u32, (h >> 32) as u32);
-        lo ^ hi
-    }
-
     /// Evaluate the unmasked function F (server-side spec).
     pub fn eval(&self, inputs: &HashMap<String, u32>) -> HashMap<WireId, u32> {
         let mut v: HashMap<WireId, u32> = HashMap::new();
@@ -471,38 +420,4 @@ mod tests {
         assert_eq!(count, 31, "ADD32 triple count");
     }
 
-    #[test]
-    fn fingerprint_stable_for_same_circuit() {
-        let c1 = build_example();
-        let c2 = build_example();
-        assert_eq!(c1.fingerprint(), c2.fingerprint());
-    }
-
-    #[test]
-    fn fingerprint_differs_for_different_circuits() {
-        let c_or_rotl = build_example();
-        let c_add32   = build_add32_example();
-        assert_ne!(c_or_rotl.fingerprint(), c_add32.fingerprint());
-    }
-
-    #[test]
-    fn fingerprint_changes_after_strong_rotate() {
-        use rand::SeedableRng;
-        use crate::expr::Expr;
-        use crate::expr_transform::strong_rotate;
-        use crate::lower::lower_to_circuit;
-
-        let a = Expr::input("a");
-        let b = Expr::input("b");
-        let c = Expr::secret_const(0x9e37_79b9);
-        let expr = Expr::rotl(Expr::xor(Expr::or(a, b), c), 5);
-
-        let mut rng_a = rand::rngs::StdRng::seed_from_u64(1);
-        let mut rng_b = rand::rngs::StdRng::seed_from_u64(2);
-
-        let ca = lower_to_circuit(&strong_rotate(&expr, &mut rng_a));
-        let cb = lower_to_circuit(&strong_rotate(&expr, &mut rng_b));
-        assert_ne!(ca.fingerprint(), cb.fingerprint(),
-            "different strong_rotate seeds should (almost certainly) yield different fingerprints");
-    }
 }

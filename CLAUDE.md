@@ -27,7 +27,7 @@ The project implements analytics integrity for `fiolin` using a masking scheme b
 | `src/expr.rs` | `Expr` — high-level expression tree (inputs, constants, XOR, AND, ROTL, etc.) |
 | `src/expr_transform.rs` | `strong_rotate` and supporting passes (constant_fold, reassociate, inject_decoys, apply_identities) |
 | `src/lower.rs` | `lower_to_circuit(&expr) -> Circuit` — converts `Expr` tree to flat gadget DAG |
-| `src/circuit.rs` | `Circuit` — salt-free value graph; `Circuit::eval()` (server spec); `Circuit::fingerprint()` |
+| `src/circuit.rs` | `Circuit` — salt-free value graph; `Circuit::eval()` (server spec) |
 | `src/circuit_transform.rs` | Post-lowering passes: `inject_remasks`, `split_secret_consts` |
 | `src/mask.rs` | `MaskedCircuit::from_circuit()` — concretization: mask propagation, triple allocation, constant baking |
 | `src/emit.rs` | `emit_rust()` (obfuscated browser source), `emit_verifier_rust()` (plaintext server source) |
@@ -49,7 +49,7 @@ Expr
                      └─► emit::emit_verifier_rust       (server Wasm source, from Circuit directly)
 ```
 
-`pipeline::compile()` wires all stages. `rotate_cheap()` reruns only `from_circuit` + `emit_rust` with a new RNG, keeping the same `Circuit` (and thus the same `ROTATION_TAG`).
+`pipeline::compile()` wires all stages. `rotate_cheap()` reruns only `from_circuit` + `emit_rust` with a new RNG, keeping the same `Circuit` (and thus the same `EXPR_DIGEST`).
 
 ## Masking Scheme
 
@@ -69,17 +69,17 @@ Each logical value `X` is stored as `X ^ m` where `m` is a salt-derived mask con
 
 ## Key Types
 
-- **`Circuit`** (`src/circuit.rs`) — salt-free gadget DAG. `pub fn eval(&self, inputs) -> u32` is the server-side reference spec. `pub fn fingerprint(&self) -> u32` is a stable FNV-1a hash of the structure (stable on cheap rotation, changes on strong rotation).
+- **`Circuit`** (`src/circuit.rs`) — salt-free gadget DAG. `pub fn eval(&self, inputs) -> u32` is the server-side reference spec.
 - **`MaskedCircuit`** (`src/mask.rs`) — result of concretization: concrete masks + constant pool + triple pool.
-- **`Compilation`** (`src/pipeline.rs`) — output of `compile()` with fields: `circuit: Circuit`, `masked: MaskedCircuit`, `code: String`, `rotation_tag: u32`.
+- **`Compilation`** (`src/pipeline.rs`) — output of `compile()` with fields: `original_expr`, `circuit: Circuit`, `masked: MaskedCircuit`, `code: String`, `expr_digest: [u8; 32]`.
 - **`Expr`** (`src/expr.rs`) — expression tree for building circuits before lowering.
 
 ## Emitted Output
 
-Both emitters prepend `pub const ROTATION_TAG: u32 = 0x...;` (= `circuit.fingerprint()`) to the generated source.
+Both emitters embed `pub const EXPR_DIGEST: [u8; 32] = [...];` (SHA-256 or HMAC-SHA-256 of the original expression before any transforms).
 
-- `emit_rust(masked, circuit, fn_name, rng)` — obfuscated output for the browser. Includes `const POOL`, Beaver triple expansion, register shuffling via linear-scan allocation with emit-seed shuffle.
-- `emit_verifier_rust(circuit, fn_name)` — plaintext DAG walk for the server. No POOL, no triple expansion. `Remask` gadgets emit as identity `let wN = wM`.
+- `emit_rust(masked, circuit, fn_name, rng, digest)` — obfuscated output for the browser. Includes `const POOL`, Beaver triple expansion, register shuffling via linear-scan allocation with emit-seed shuffle.
+- `emit_verifier_rust(circuit, fn_name, digest)` — plaintext DAG walk for the server. No POOL, no triple expansion. `Remask` gadgets emit as identity `let wN = wM`. Parameters use `input_{name}` prefix to avoid collision with `w{N}` intermediates.
 
 ## Key Invariants
 
@@ -90,9 +90,9 @@ Both emitters prepend `pub const ROTATION_TAG: u32 = 0x...;` (= `circuit.fingerp
 
 ## Rotation
 
-**Cheap rotation**: `rotate_cheap(&compilation, fn_name, rng)` — reruns concretization with a new seed. Same `Circuit`, same `ROTATION_TAG`. Server verifier does not change; no server redeploy needed.
+**Cheap rotation**: `rotate_cheap(&compilation, fn_name, rng)` — reruns concretization with a new seed. Same `Circuit`, same `EXPR_DIGEST`. Server verifier does not change; no server redeploy needed.
 
-**Strong rotation**: rebuild from `Expr` → `expr_transform::strong_rotate` → `lower_to_circuit` → `compile`. New `Circuit`, new `ROTATION_TAG`. Both browser and server Wasm must be redeployed.
+**Strong rotation**: rebuild from `Expr` → `expr_transform::strong_rotate` → `lower_to_circuit` → `compile`. New `Circuit`, same `EXPR_DIGEST` (digest is from the original expression, not the circuit). Server verifier does not change; no server redeploy needed.
 
 ### AST Transforms (`src/expr_transform.rs`)
 
@@ -121,7 +121,7 @@ Two thin crates import `xorpl` and produce Wasm targets:
 
 Both compile to `wasm32-unknown-unknown`. For existing Cloudflare Workers (JS/TS), bind the Wasm via `[wasm_modules]` in `wrangler.toml`; instantiate with `new WebAssembly.Instance(env.VERIFIER)` and call `instance.exports.fn_name(a, b)`.
 
-The `ROTATION_TAG` in both Wasm artifacts is the link: the server uses it to look up the right verifier and to key the D1 replay filter.
+The `EXPR_DIGEST` in both Wasm artifacts is the link: the server uses it to look up the right verifier and to key the D1 replay filter.
 
 ## Fixture System
 
@@ -129,6 +129,6 @@ Tests live in `tests/fixtures/<name>.rs`, managed by `tests/emit_tests.rs` (requ
 
 - **Correctness** (`gives_right_answer`): includes the fixture source and calls the emitted function on known inputs.
 - **Skew check** (`fixtures_not_out_of_sync`): re-emits every fixture and diffs against disk. Run `regen_fixtures` after changing the emitter.
-- **Structural** (`structural_properties`): checks for `pub const ROTATION_TAG`, `const POOL`, correct function signature.
+- **Structural** (`structural_properties`): checks for `pub const EXPR_DIGEST`, `const POOL`, correct function signature.
 
 When adding a fixture: add a definition to `src/fixture_defs.rs`, add a test block in `tests/emit_tests.rs`, run `regen_fixtures`.

@@ -46,18 +46,17 @@ let expr = Expr::rotl(Expr::xor(Expr::or(a, b), c), 5);
 
 // Compile to obfuscated browser source + server verifier source.
 let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-let compilation = compile(&expr, "my_fn", &mut rng);
+let compilation = compile(expr, "my_fn", &mut rng, None);
 
-println!("rotation tag: {:08x}", compilation.rotation_tag);
 println!("browser source:\n{}", compilation.code);
 
-let verifier_source = emit_verifier_rust(&compilation.circuit, "my_fn_verify");
+let verifier_source = compile_verifier(&compilation.original_expr, "my_fn_verify", None);
 
-// Cheap rotation: new masks, same circuit structure, same rotation tag.
+// Cheap rotation: new masks, same circuit structure, same EXPR_DIGEST.
 let (_, new_code) = rotate_cheap(&compilation, "my_fn", &mut rng);
 ```
 
-Both `compilation.code` and `verifier_source` are valid Rust files that compile to `wasm32-unknown-unknown`. The emitted function signature is `pub fn <name>(...) -> u32`. Both embed `pub const ROTATION_TAG: u32 = 0x...;` so the server can match browser submissions to the right verifier.
+Both `compilation.code` and `verifier_source` are valid Rust files that compile to `wasm32-unknown-unknown`. The emitted function signature is `pub fn <name>(...) -> u32`. Both embed `pub const EXPR_DIGEST: [u8; 32] = [...];` so the server can match browser submissions to the right verifier.
 
 ## Gadget catalog
 
@@ -78,7 +77,7 @@ Both `compilation.code` and `verifier_source` are valid Rust files that compile 
 
 Two layers:
 
-1. **Value graph (`Circuit`).** A salt-free dataflow DAG of gadgets that *is* the mixing function `F` plus already-predicated control flow. The server mirrors this exactly — masks cancel, so value semantics are identical. `Circuit::fingerprint()` is a stable FNV-1a hash of the structure.
+1. **Value graph (`Circuit`).** A salt-free dataflow DAG of gadgets that *is* the mixing function `F` plus already-predicated control flow. The server mirrors this exactly — masks cancel, so value semantics are identical.
 2. **Concretization.** Given a seed, decorate every wire with a concrete mask and emit all baked constants. Rotating is just re-running concretization with a new seed.
 
 ### Pipeline
@@ -95,8 +94,8 @@ Expr
 
 ### Rotation strengths
 
-- **Cheap:** `rotate_cheap()` reruns concretization with a new seed — same circuit structure, fresh constants, same `ROTATION_TAG`. Server verifier is unchanged; only the browser Wasm redeploys.
-- **Strong:** rebuild from `Expr` through `expr_transform::strong_rotate` — new gadget structure, new `ROTATION_TAG`. Both browser and server Wasm redeploy.
+- **Cheap:** `rotate_cheap()` reruns concretization with a new seed — same circuit structure, fresh constants, same `EXPR_DIGEST`. Server verifier is unchanged; only the browser Wasm redeploys.
+- **Strong:** rebuild from `Expr` through `expr_transform::strong_rotate` — new gadget structure, same `EXPR_DIGEST` (digest is computed from the original expression before transforms). Server verifier is unchanged; only the browser Wasm redeploys.
 
 Strong rotation applies five AST passes: constant folding, reassociation, decoy injection, identity rewrites (De Morgan, double-NOT, XOR flip), and a second constant fold pass to clean up.
 
@@ -111,7 +110,7 @@ The intended downstream pattern is two thin crates that import `xorpl`:
 - **Browser crate** — calls `compile()`, includes the emitted source, exposes `#[no_mangle] pub extern "C" fn compute(...)` to JavaScript.
 - **Server crate** — calls `emit_verifier_rust()` on the same `Circuit`, exposes the same signature. Plain arithmetic, no obfuscation overhead.
 
-Both compile to `wasm32-unknown-unknown`. An existing Cloudflare Worker (JS/TS) can bind the Wasm via `[wasm_modules]` in `wrangler.toml` and call `instance.exports.fn_name(a, b)`. The server matches `ROTATION_TAG` in the request to the right compiled-in verifier function, and keys D1 replay filtering on `(rotation_tag, checksum)`.
+Both compile to `wasm32-unknown-unknown`. An existing Cloudflare Worker (JS/TS) can bind the Wasm via `[wasm_modules]` in `wrangler.toml` and call `instance.exports.fn_name(a, b)`. The server matches `EXPR_DIGEST` in the request to the right compiled-in verifier function, and keys D1 replay filtering on `(expr_digest, checksum)`.
 
 ## Stack
 
