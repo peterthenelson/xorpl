@@ -104,8 +104,11 @@ pub fn emit_rust(masked: &MaskedCircuit, circuit: &Circuit, fn_name: &str, rng: 
         .map(|m| m + 1)
         .unwrap_or(0);
 
-    let sig_params = circuit.gadgets.iter()
+    let mut ingest_names: Vec<&str> = circuit.gadgets.iter()
         .filter_map(|g| if let Gadget::Ingest { name, .. } = g { Some(name.as_str()) } else { None })
+        .collect();
+    ingest_names.sort_unstable();
+    let sig_params = ingest_names.iter()
         .map(|name| format!("{name}: u32"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -155,8 +158,11 @@ pub fn emit_rust(masked: &MaskedCircuit, circuit: &Circuit, fn_name: &str, rng: 
 /// name), avoiding any collision with the `w{wire_id}` namespace used for
 /// intermediate variables.
 pub fn emit_verifier_rust(circuit: &Circuit, fn_name: &str, expr_digest: &[u8; 32]) -> String {
-    let sig_params = circuit.gadgets.iter()
+    let mut ingest_names: Vec<&str> = circuit.gadgets.iter()
         .filter_map(|g| if let Gadget::Ingest { name, .. } = g { Some(name.as_str()) } else { None })
+        .collect();
+    ingest_names.sort_unstable();
+    let sig_params = ingest_names.iter()
         .map(|name| format!("input_{name}: u32"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -440,5 +446,56 @@ mod tests {
         let emitted = emit_verifier_rust(&circuit, "f", &[0u8; 32]);
         assert!(!emitted.contains("POOL"),  "verifier must not reference POOL");
         assert!(!emitted.contains("let (t, ma, mb)"), "verifier must not use Beaver triples");
+    }
+
+    /// Extract sorted parameter names from a `pub fn` signature line.
+    ///
+    /// For a browser sig like `pub fn f(a: u32, b: u32) -> u32 {` this returns
+    /// `["a", "b"]`; for a verifier sig with `input_a: u32` it strips the
+    /// `input_` prefix so both are comparable.
+    fn param_names_from_sig(sig: &str) -> Vec<String> {
+        let inner = sig
+            .split('(').nth(1).unwrap()
+            .split(')').next().unwrap();
+        inner.split(',')
+            .map(|p| p.trim().split(':').next().unwrap().trim()
+                      .trim_start_matches("input_").to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn emit_and_verifier_param_order_matches_after_strong_rotate() {
+        use crate::expr_transform::strong_rotate;
+        use crate::mask::MaskedCircuit;
+        use rand::SeedableRng;
+
+        let a = Expr::input("a");
+        let b = Expr::input("b");
+        let expr = std::rc::Rc::new(Expr::xor(
+            Expr::or(a, b),
+            Expr::secret_const(0x9e37_79b9),
+        ));
+
+        let verifier_circuit = lower_to_circuit(&expr);
+        let verifier = emit_verifier_rust(&verifier_circuit, "f", &[0u8; 32]);
+        let verifier_params = param_names_from_sig(
+            verifier.lines().find(|l| l.starts_with("pub fn")).unwrap()
+        );
+
+        // Strong rotate changes the topological order of Ingest gadgets; both
+        // emitters must still produce the same (sorted) parameter order.
+        for seed in 0u64..20 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let rotated = strong_rotate(&expr, &mut rng);
+            let circuit = lower_to_circuit(&rotated);
+            let masked  = MaskedCircuit::from_circuit(&circuit, &mut rng);
+            let browser = emit_rust(&masked, &circuit, "f", &mut rng, &[0u8; 32]);
+            let browser_params = param_names_from_sig(
+                browser.lines().find(|l| l.starts_with("pub fn")).unwrap()
+            );
+            assert_eq!(verifier_params, browser_params,
+                "parameter order mismatch at seed {seed}: verifier={verifier_params:?} browser={browser_params:?}");
+        }
     }
 }
