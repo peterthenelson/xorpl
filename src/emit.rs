@@ -140,10 +140,14 @@ pub fn emit_rust(masked: &MaskedCircuit, circuit: &Circuit, fn_name: &str, rng: 
 /// Each Remask gadget emits a transparent identity assignment (`let wN = wM`)
 /// which the compiler eliminates.  All other gadgets map directly to their
 /// unmasked arithmetic.
+///
+/// Parameters are named `input_{name}` (where `name` is the circuit's Ingest
+/// name), avoiding any collision with the `w{wire_id}` namespace used for
+/// intermediate variables.
 pub fn emit_verifier_rust(circuit: &Circuit, fn_name: &str) -> String {
     let sig_params = circuit.gadgets.iter()
         .filter_map(|g| if let Gadget::Ingest { name, .. } = g { Some(name.as_str()) } else { None })
-        .map(|name| format!("{name}: u32"))
+        .map(|name| format!("input_{name}: u32"))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -164,7 +168,7 @@ pub fn emit_verifier_rust(circuit: &Circuit, fn_name: &str) -> String {
 fn emit_plain_gadget(g: &Gadget) -> String {
     match g {
         Gadget::Ingest { name, out, .. } =>
-            format!("    let w{out} = {name};\n"),
+            format!("    let w{out} = input_{name};\n"),
         Gadget::PublicConst { k, out } =>
             format!("    let w{out} = 0x{k:08x}u32;\n"),
         Gadget::SecretConst { k, out, .. } =>
@@ -378,7 +382,7 @@ mod tests {
     fn verifier_has_correct_signature() {
         let circuit  = or_rotl_circuit();
         let emitted  = emit_verifier_rust(&circuit, "my_fn");
-        assert!(emitted.contains("pub fn my_fn(a: u32, b: u32) -> u32 {"),
+        assert!(emitted.contains("pub fn my_fn(input_a: u32, input_b: u32) -> u32 {"),
             "wrong signature:\n{emitted}");
         assert!(emitted.contains("pub const ROTATION_TAG"),
             "missing ROTATION_TAG:\n{emitted}");
@@ -401,9 +405,9 @@ mod tests {
         let known = ((0x1234_5678u32 | 0xDEAD_BEEFu32) ^ 0x9e37_79b9u32).rotate_left(5);
         assert_eq!(expected, known);
 
-        // Structural: all input names appear in the body.
-        assert!(emitted.contains("let w0 = a;"), "missing ingest a:\n{emitted}");
-        assert!(emitted.contains("let w1 = b;"), "missing ingest b:\n{emitted}");
+        // Structural: ingest wires reference their prefixed parameter names.
+        assert!(emitted.contains("let w0 = input_a;"), "missing ingest a:\n{emitted}");
+        assert!(emitted.contains("let w1 = input_b;"), "missing ingest b:\n{emitted}");
         assert!(emitted.contains("rotate_left(5)"),  "missing rotl:\n{emitted}");
         assert!(emitted.contains("0x9e3779b9u32"), "missing secret const:\n{emitted}");
     }

@@ -260,6 +260,24 @@ fn verifier_fixture_not_out_of_sync() {
 }
 
 // ---------------------------------------------------------------------------
+// Verifier parameter naming
+// ---------------------------------------------------------------------------
+
+/// Parameters use the `input_{name}` prefix so they can never collide with the
+/// `w{wire_id}` intermediates, even when circuit inputs are named "w0".."w7".
+#[test]
+fn verifier_parameters_use_input_prefix() {
+    // Use input names that match the wire-id namespace — the pattern that
+    // previously caused shadowing before the `input_` prefix was introduced.
+    let circuit = lower_to_circuit(&Expr::xor(Expr::input("w0"), Expr::input("w7")));
+    let verifier = emit_verifier_rust(&circuit, "verify");
+    assert!(verifier.contains("input_w0: u32"), "expected input_w0 parameter:\n{verifier}");
+    assert!(verifier.contains("input_w7: u32"), "expected input_w7 parameter:\n{verifier}");
+    assert!(verifier.contains("let w0 = input_w0;"), "expected ingest binding:\n{verifier}");
+    assert!(verifier.contains("let w1 = input_w7;"), "expected ingest binding:\n{verifier}");
+}
+
+// ---------------------------------------------------------------------------
 // Structural tests
 // ---------------------------------------------------------------------------
 
