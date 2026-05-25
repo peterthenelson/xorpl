@@ -111,6 +111,25 @@ fn chacha_qr_expected(a: u32, b: u32, c: u32, d: u32) -> u32 {
     a2 ^ b4 ^ c2 ^ d4
 }
 
+fn qr_outputs(a: u32, b: u32, c: u32, d: u32) -> (u32, u32, u32, u32) {
+    let a1 = a.wrapping_add(b);
+    let d2 = (d ^ a1).rotate_left(16);
+    let c1 = c.wrapping_add(d2);
+    let b2 = (b ^ c1).rotate_left(12);
+    let a2 = a1.wrapping_add(b2);
+    let d4 = (d2 ^ a2).rotate_left(8);
+    let c2 = c1.wrapping_add(d4);
+    let b4 = (b2 ^ c2).rotate_left(7);
+    (a2, b4, c2, d4)
+}
+
+fn sha256_qr_expected(w: [u32; 8]) -> u32 {
+    let (a, b, c, d) = qr_outputs(w[0], w[1], w[2], w[3]);
+    let (e, f, g, h) = qr_outputs(w[4], w[5], w[6], w[7]);
+    let (r0, r1, r2, r3) = qr_outputs(a ^ e, b ^ f, c ^ g, d ^ h);
+    r0 ^ r1 ^ r2 ^ r3
+}
+
 mod chacha_qr {
     use super::chacha_qr_expected as expected;
     include!("fixtures/chacha_qr.rs");
@@ -145,6 +164,28 @@ mod chacha_qr_rotated {
         for &(a, b, c, d) in cases {
             assert_eq!(chacha_qr_rotated(a, b, c, d), expected(a, b, c, d),
                 "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})");
+        }
+    }
+}
+
+mod sha256_qr {
+    use super::sha256_qr_expected as expected;
+    include!("fixtures/sha256_qr.rs");
+
+    #[test]
+    fn gives_right_answer() {
+        let cases: &[[u32; 8]] = &[
+            [0x0000_0000; 8],
+            [0xFFFF_FFFF; 8],
+            [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574,
+             0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321],
+        ];
+        for &w in cases {
+            assert_eq!(
+                sha256_qr(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]),
+                expected(w),
+                "inputs {w:08x?}",
+            );
         }
     }
 }

@@ -68,6 +68,7 @@ pub static ALL_FIXTURES: &[FixtureDef] = &[
     FixtureDef { name: "chacha_qr",          seed: 0, structure_seed: None,     build: build_chacha_qr     },
     FixtureDef { name: "chacha_qr_rotated",  seed: 0, structure_seed: Some(42), build: build_chacha_qr     },
     FixtureDef { name: "or_rotl_mux_decoy", seed: 0, structure_seed: None,     build: build_or_rotl_mux_decoy },
+    FixtureDef { name: "sha256_qr",          seed: 0, structure_seed: None,     build: build_sha256_qr         },
     // Add new fixtures here ↑
 ];
 
@@ -144,4 +145,52 @@ fn build_chacha_qr() -> Rc<Expr> {
     let b4 = Expr::rotl(Expr::xor(b2,        c2.clone()),  7);
 
     Expr::xor(Expr::xor(a2, b4), Expr::xor(c2, d4))
+}
+
+/// One ChaCha quarter-round returning the four output words as separate Exprs.
+fn qr_outputs(
+    a: Rc<Expr>, b: Rc<Expr>, c: Rc<Expr>, d: Rc<Expr>,
+) -> (Rc<Expr>, Rc<Expr>, Rc<Expr>, Rc<Expr>) {
+    let a1 = Expr::add(a,          b.clone());
+    let d2 = Expr::rotl(Expr::xor(d,          a1.clone()), 16);
+    let c1 = Expr::add(c,          d2.clone());
+    let b2 = Expr::rotl(Expr::xor(b,          c1.clone()), 12);
+    let a2 = Expr::add(a1,         b2.clone());
+    let d4 = Expr::rotl(Expr::xor(d2,         a2.clone()),  8);
+    let c2 = Expr::add(c1,         d4.clone());
+    let b4 = Expr::rotl(Expr::xor(b2,         c2.clone()),  7);
+    (a2, b4, c2, d4)
+}
+
+/// F(w0..w7) — full 256-bit (8 × u32) digest checksum.
+///
+/// Two parallel quarter-rounds process each 128-bit half; their four output
+/// words are XORed pairwise (free linear ops), then a third quarter-round
+/// folds the cross-mixed quad into the final 32-bit checksum.  Every input
+/// word influences the output through the combining round.
+///
+/// ```text
+/// (a,b,c,d) = qr(w0,w1,w2,w3)
+/// (e,f,g,h) = qr(w4,w5,w6,w7)
+/// output    = qr_fold(a^e, b^f, c^g, d^h)
+/// ```
+///
+/// AND-triple cost: 31 × 3 = 93 (three add32 carry chains).
+fn build_sha256_qr() -> Rc<Expr> {
+    let (a, b, c, d) = qr_outputs(
+        Expr::input("w0"), Expr::input("w1"),
+        Expr::input("w2"), Expr::input("w3"),
+    );
+    let (e, f, g, h) = qr_outputs(
+        Expr::input("w4"), Expr::input("w5"),
+        Expr::input("w6"), Expr::input("w7"),
+    );
+
+    let m0 = Expr::xor(a, e);
+    let m1 = Expr::xor(b, f);
+    let m2 = Expr::xor(c, g);
+    let m3 = Expr::xor(d, h);
+
+    let (r0, r1, r2, r3) = qr_outputs(m0, m1, m2, m3);
+    Expr::xor(Expr::xor(r0, r1), Expr::xor(r2, r3))
 }
