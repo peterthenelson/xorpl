@@ -4,10 +4,11 @@
 //!
 //! 1. Write a `build_*()` function below that returns an `Rc<Expr>`.
 //! 2. Add a `FixtureDef` entry to `ALL_FIXTURES`.
-//! 3. Run `cargo run --bin regen_fixtures` to generate `tests/fixtures/<name>.rs`.
+//! 3. Run `cargo run --bin regen_fixtures` to generate `tests/fixtures/<name>.rs`
+//!    and `tests/fixtures/<name>_verify.rs`.
 //! 4. In `tests/emit_tests.rs`, add a correctness test block for the new fixture
 //!    (copy an existing block and update the name, inputs, and expected value).
-//! 5. Commit this file, the new fixture file, and the updated test file together.
+//! 5. Commit this file, the new fixture files, and the updated test file together.
 //!
 //! The skew check (`fixtures_not_out_of_sync`) and structural tests in
 //! `tests/emit_tests.rs`, as well as `src/bin/regen_fixtures.rs`, both iterate

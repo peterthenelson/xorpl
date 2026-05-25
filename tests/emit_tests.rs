@@ -6,9 +6,13 @@
 //! - **Correctness** (`*::gives_right_answer`): include the committed fixture
 //!   source and call the emitted function on known inputs.
 //!
+//! - **Agreement** (`*::verifier_agrees`): assert that the obfuscated browser
+//!   function and the plaintext verifier return the same value on the same inputs.
+//!
 //! - **Skew check** (`fixtures_not_out_of_sync`): re-emit every fixture and
 //!   assert the output matches the file on disk.  Catches changing the emitter
-//!   without regenerating the fixtures.
+//!   without regenerating the fixtures.  Covers both `{name}.rs` and
+//!   `{name}_verify.rs` for every entry in `ALL_FIXTURES`.
 //!
 //! - **Structural** (`structural_properties`): check properties of the emitted
 //!   string (function signature, POOL constant) without needing to compile it.
@@ -27,50 +31,78 @@ use xorpl::fixture_defs::ALL_FIXTURES;
 // Correctness tests
 //
 // One module per fixture.  When adding a new fixture:
-//   1. Add a placeholder file at tests/fixtures/<name>.rs
-//   2. Add a `mod <name> { include!(...); #[test] fn gives_right_answer() { ... } }` block here.
+//   1. Add a placeholder file at tests/fixtures/<name>.rs (and <name>_verify.rs)
+//   2. Add a mod block here with gives_right_answer and verifier_agrees tests.
 //   3. Run `cargo run --bin regen_fixtures` then remove any #[ignore].
 // ---------------------------------------------------------------------------
 
 mod or_rotl_demo {
     include!("fixtures/or_rotl_demo.rs");
+    mod verify { include!("fixtures/or_rotl_demo_verify.rs"); }
+
+    const CASES: &[(u32, u32)] = &[
+        (0x0000_0000, 0x0000_0000),
+        (0xFFFF_FFFF, 0xFFFF_FFFF),
+        (0x1234_5678, 0xDEAD_BEEF),
+        (0xAAAA_AAAA, 0x5555_5555),
+    ];
 
     #[test]
     fn gives_right_answer() {
-        let cases: &[(u32, u32)] = &[
-            (0x0000_0000, 0x0000_0000),
-            (0xFFFF_FFFF, 0xFFFF_FFFF),
-            (0x1234_5678, 0xDEAD_BEEF),
-            (0xAAAA_AAAA, 0x5555_5555),
-        ];
-        for &(a, b) in cases {
+        for &(a, b) in CASES {
             let expected = ((a | b) ^ 0x9e37_79b9u32).rotate_left(5);
             assert_eq!(or_rotl_demo(a, b), expected, "inputs ({a:#010x}, {b:#010x})");
+        }
+    }
+
+    #[test]
+    fn verifier_agrees() {
+        for &(a, b) in CASES {
+            assert_eq!(or_rotl_demo(a, b), verify::or_rotl_demo_verify(a, b),
+                "inputs ({a:#010x}, {b:#010x})");
         }
     }
 }
 
 mod add32_demo {
     include!("fixtures/add32_demo.rs");
+    mod verify { include!("fixtures/add32_demo_verify.rs"); }
+
+    const CASES: &[(u32, u32)] = &[
+        (0, 0),
+        (1, 1),
+        (0xFFFF_FFFF, 1),
+        (0x1234_5678, 0x8765_4321),
+        (0xDEAD_BEEF, 0xCAFE_BABE),
+    ];
 
     #[test]
     fn gives_right_answer() {
-        let cases: &[(u32, u32)] = &[
-            (0, 0),
-            (1, 1),
-            (0xFFFF_FFFF, 1),
-            (0x1234_5678, 0x8765_4321),
-            (0xDEAD_BEEF, 0xCAFE_BABE),
-        ];
-        for &(a, b) in cases {
+        for &(a, b) in CASES {
             let expected = a.wrapping_add(b);
             assert_eq!(add32_demo(a, b), expected, "inputs ({a:#010x}, {b:#010x})");
+        }
+    }
+
+    #[test]
+    fn verifier_agrees() {
+        for &(a, b) in CASES {
+            assert_eq!(add32_demo(a, b), verify::add32_demo_verify(a, b),
+                "inputs ({a:#010x}, {b:#010x})");
         }
     }
 }
 
 mod mux_demo {
     include!("fixtures/mux_demo.rs");
+    mod verify { include!("fixtures/mux_demo_verify.rs"); }
+
+    const CASES: &[(u32, u32, u32)] = &[
+        (0xFFFF_FFFF, 0xAAAA_AAAA, 0x5555_5555),
+        (0x0000_0000, 0xAAAA_AAAA, 0x5555_5555),
+        (0xFFFF_0000, 0xDEAD_BEEF, 0xCAFE_BABE),
+        (0x0000_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE),
+    ];
 
     #[test]
     fn gives_right_answer() {
@@ -79,22 +111,40 @@ mod mux_demo {
         assert_eq!(mux_demo(0xFFFF_0000, 0xDEAD_BEEF, 0xCAFE_BABE), 0xDEAD_BABE);
         assert_eq!(mux_demo(0x0000_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE), 0xCAFE_BEEF);
     }
+
+    #[test]
+    fn verifier_agrees() {
+        for &(cond, t, f) in CASES {
+            assert_eq!(mux_demo(cond, t, f), verify::mux_demo_verify(cond, t, f),
+                "inputs ({cond:#010x}, {t:#010x}, {f:#010x})");
+        }
+    }
 }
 
 mod or_rotl_mux_decoy {
     include!("fixtures/or_rotl_mux_decoy.rs");
+    mod verify { include!("fixtures/or_rotl_mux_decoy_verify.rs"); }
+
+    const CASES: &[(u32, u32)] = &[
+        (0x0000_0000, 0x0000_0000),
+        (0xFFFF_FFFF, 0xFFFF_FFFF),
+        (0x1234_5678, 0xDEAD_BEEF),
+        (0xAAAA_AAAA, 0x5555_5555),
+    ];
 
     #[test]
     fn gives_right_answer() {
-        let cases: &[(u32, u32)] = &[
-            (0x0000_0000, 0x0000_0000),
-            (0xFFFF_FFFF, 0xFFFF_FFFF),
-            (0x1234_5678, 0xDEAD_BEEF),
-            (0xAAAA_AAAA, 0x5555_5555),
-        ];
-        for &(a, b) in cases {
+        for &(a, b) in CASES {
             let expected = ((a | b) ^ 0x9e37_79b9u32).rotate_left(5);
             assert_eq!(or_rotl_mux_decoy(a, b), expected, "inputs ({a:#010x}, {b:#010x})");
+        }
+    }
+
+    #[test]
+    fn verifier_agrees() {
+        for &(a, b) in CASES {
+            assert_eq!(or_rotl_mux_decoy(a, b), verify::or_rotl_mux_decoy_verify(a, b),
+                "inputs ({a:#010x}, {b:#010x})");
         }
     }
 }
@@ -133,17 +183,27 @@ fn sha256_qr_expected(w: [u32; 8]) -> u32 {
 mod chacha_qr {
     use super::chacha_qr_expected as expected;
     include!("fixtures/chacha_qr.rs");
+    mod verify { include!("fixtures/chacha_qr_verify.rs"); }
+
+    const CASES: &[(u32, u32, u32, u32)] = &[
+        (0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000),
+        (0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF),
+        (0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574),
+        (0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321),
+    ];
 
     #[test]
     fn gives_right_answer() {
-        let cases: &[(u32, u32, u32, u32)] = &[
-            (0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000),
-            (0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF),
-            (0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574),
-            (0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321),
-        ];
-        for &(a, b, c, d) in cases {
+        for &(a, b, c, d) in CASES {
             assert_eq!(chacha_qr(a, b, c, d), expected(a, b, c, d),
+                "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})");
+        }
+    }
+
+    #[test]
+    fn verifier_agrees() {
+        for &(a, b, c, d) in CASES {
+            assert_eq!(chacha_qr(a, b, c, d), verify::chacha_qr_verify(a, b, c, d),
                 "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})");
         }
     }
@@ -152,17 +212,27 @@ mod chacha_qr {
 mod chacha_qr_rotated {
     use super::chacha_qr_expected as expected;
     include!("fixtures/chacha_qr_rotated.rs");
+    mod verify { include!("fixtures/chacha_qr_rotated_verify.rs"); }
+
+    const CASES: &[(u32, u32, u32, u32)] = &[
+        (0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000),
+        (0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF),
+        (0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574),
+        (0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321),
+    ];
 
     #[test]
     fn gives_right_answer() {
-        let cases: &[(u32, u32, u32, u32)] = &[
-            (0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000),
-            (0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF, 0xFFFF_FFFF),
-            (0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574),
-            (0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321),
-        ];
-        for &(a, b, c, d) in cases {
+        for &(a, b, c, d) in CASES {
             assert_eq!(chacha_qr_rotated(a, b, c, d), expected(a, b, c, d),
+                "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})");
+        }
+    }
+
+    #[test]
+    fn verifier_agrees() {
+        for &(a, b, c, d) in CASES {
+            assert_eq!(chacha_qr_rotated(a, b, c, d), verify::chacha_qr_rotated_verify(a, b, c, d),
                 "inputs ({a:#010x}, {b:#010x}, {c:#010x}, {d:#010x})");
         }
     }
@@ -171,19 +241,32 @@ mod chacha_qr_rotated {
 mod sha256_qr {
     use super::sha256_qr_expected as expected;
     include!("fixtures/sha256_qr.rs");
+    mod verify { include!("fixtures/sha256_qr_verify.rs"); }
+
+    const CASES: &[[u32; 8]] = &[
+        [0x0000_0000; 8],
+        [0xFFFF_FFFF; 8],
+        [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574,
+         0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321],
+    ];
 
     #[test]
     fn gives_right_answer() {
-        let cases: &[[u32; 8]] = &[
-            [0x0000_0000; 8],
-            [0xFFFF_FFFF; 8],
-            [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574,
-             0xDEAD_BEEF, 0xCAFE_BABE, 0x1234_5678, 0x8765_4321],
-        ];
-        for &w in cases {
+        for &w in CASES {
             assert_eq!(
                 sha256_qr(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]),
                 expected(w),
+                "inputs {w:08x?}",
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_agrees() {
+        for &w in CASES {
+            assert_eq!(
+                sha256_qr(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]),
+                verify::sha256_qr_verify(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]),
                 "inputs {w:08x?}",
             );
         }
@@ -206,57 +289,20 @@ fn fixtures_not_out_of_sync() {
         let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             panic!("cannot read {path}: {e}\nRun `cargo run --bin regen_fixtures`")
         });
-
-        assert_eq!(
-            emitted, on_disk,
+        assert_eq!(emitted, on_disk,
             "fixture `{}.rs` is out of sync — run `cargo run --bin regen_fixtures`",
-            def.name
-        );
+            def.name);
+
+        let verify_name = format!("{}_verify", def.name);
+        let verifier = emit_verifier_rust(&circuit, &verify_name);
+        let verify_path = format!("tests/fixtures/{}_verify.rs", def.name);
+        let verifier_on_disk = std::fs::read_to_string(&verify_path).unwrap_or_else(|e| {
+            panic!("cannot read {verify_path}: {e}\nRun `cargo run --bin regen_fixtures`")
+        });
+        assert_eq!(verifier, verifier_on_disk,
+            "fixture `{}_verify.rs` is out of sync — run `cargo run --bin regen_fixtures`",
+            def.name);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Verifier correctness
-// ---------------------------------------------------------------------------
-
-mod or_rotl_demo_verifier {
-    include!("fixtures/or_rotl_demo_verifier.rs");
-
-    #[test]
-    fn gives_right_answer() {
-        let cases: &[(u32, u32)] = &[
-            (0x0000_0000, 0x0000_0000),
-            (0xFFFF_FFFF, 0xFFFF_FFFF),
-            (0x1234_5678, 0xDEAD_BEEF),
-            (0xAAAA_AAAA, 0x5555_5555),
-        ];
-        for &(a, b) in cases {
-            let expected = ((a | b) ^ 0x9e37_79b9u32).rotate_left(5);
-            assert_eq!(or_rotl_demo_verify(a, b), expected,
-                "inputs ({a:#010x}, {b:#010x})");
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Verifier skew check
-// ---------------------------------------------------------------------------
-
-#[test]
-fn verifier_fixture_not_out_of_sync() {
-    let a = Expr::input("a");
-    let b = Expr::input("b");
-    let c = Expr::secret_const(0x9e37_79b9);
-    let expr = Expr::rotl(Expr::xor(Expr::or(a, b), c), 5);
-    let circuit = lower_to_circuit(&expr);
-    let emitted = emit_verifier_rust(&circuit, "or_rotl_demo_verify");
-
-    let path    = "tests/fixtures/or_rotl_demo_verifier.rs";
-    let on_disk = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
-
-    assert_eq!(emitted, on_disk,
-        "verifier fixture is out of sync — re-emit with emit_verifier_rust");
 }
 
 // ---------------------------------------------------------------------------
